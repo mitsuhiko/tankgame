@@ -215,7 +215,7 @@ if(APPLE AND NOT EMSCRIPTEN)
         "-framework AudioToolbox"
     )
 elseif(UNIX AND NOT EMSCRIPTEN)
-    target_link_libraries(tankgame PRIVATE asound)
+    target_link_libraries(tankgame PRIVATE asound m)
 endif()
 
 # Testing (M0.4)
