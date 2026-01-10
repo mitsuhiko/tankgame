@@ -48,6 +48,7 @@
 #include "game/pz_tile_registry.h"
 #include "game/pz_toxic_cloud.h"
 #include "game/pz_tracks.h"
+#include "net/pz_net.h"
 
 #define WINDOW_TITLE "Tank Game"
 #define WINDOW_WIDTH 1280
@@ -250,6 +251,9 @@ typedef struct app_state {
     // Debug script execution (for automated testing, not gameplay scripting)
     // Can be loaded from file, inline string, or injected via command pipe
     pz_debug_script *debug_script;
+
+    // Networking
+    pz_net_offer *join_offer;
 
     // Core systems (persistent across maps)
     pz_renderer *renderer;
@@ -870,6 +874,7 @@ parse_args(int argc, char *argv[])
     g_app.show_debug_texture_scale = false;
     g_app.debug_script_path_arg = NULL;
     g_app.inline_script_arg = NULL;
+    g_app.join_offer = NULL;
 
     // Track deprecated screenshot flags for combined error message
     const char *deprecated_screenshot_path = NULL;
@@ -1002,6 +1007,19 @@ app_init(void)
 
     pz_log_init();
     pz_time_init();
+
+    if (g_app.join_payload_arg) {
+        g_app.join_offer = pz_net_offer_decode_url(g_app.join_payload_arg);
+        if (!g_app.join_offer) {
+            pz_log(
+                PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Invalid join payload provided");
+            sapp_quit();
+            return;
+        }
+        pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
+            "Join payload loaded: host=%s map=%s", g_app.join_offer->host_name,
+            g_app.join_offer->map_name);
+    }
 
     // Check environment variables for audio control
     // PZ_MUSIC=0 disables music, PZ_SOUNDS=0 disables sound effects
@@ -3448,6 +3466,8 @@ app_cleanup(void)
     pz_debug_overlay_destroy(g_app.debug_overlay);
     pz_cursor_destroy(g_app.cursor);
     pz_debug_cmd_shutdown();
+
+    pz_net_offer_free(g_app.join_offer);
 
     if (g_app.laser_vb != PZ_INVALID_HANDLE) {
         pz_renderer_destroy_buffer(g_app.renderer, g_app.laser_vb);
