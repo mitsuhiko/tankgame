@@ -74,6 +74,48 @@
             gap: 12px;
             flex-wrap: wrap;
         }
+        .join-panel {
+            margin-top: 16px;
+            padding: 16px;
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(12, 17, 26, 0.72);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .join-panel h3 {
+            font-size: 14px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--accent-2);
+        }
+        .join-panel p {
+            font-size: 13px;
+            color: var(--muted);
+        }
+        .join-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+        .join-payload {
+            display: none;
+            gap: 8px;
+            flex-direction: column;
+        }
+        .join-payload textarea {
+            width: 100%;
+            min-height: 96px;
+            resize: vertical;
+            background: rgba(6, 10, 16, 0.8);
+            color: var(--text);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 10px;
+            font-size: 12px;
+        }
         .controls-left {
             display: flex;
             gap: 8px;
@@ -158,11 +200,34 @@
                 <button type="button" onclick="toggleFullscreen()">Fullscreen</button>
             </div>
         </div>
+
+        <div class="join-panel" id="join-panel" style="display: none;">
+            <h3>Join Link Detected</h3>
+            <p>Launching the web client with the embedded join payload. You can also copy the payload to join from the desktop app.</p>
+            <div class="join-actions">
+                <button type="button" id="join-show-payload">Show payload</button>
+                <button type="button" id="join-copy-command">Copy desktop command</button>
+            </div>
+            <div class="join-payload" id="join-payload">
+                <textarea id="join-payload-text" readonly></textarea>
+            </div>
+        </div>
     </div>
 
     <script>
+        function getJoinPayload() {
+            var hash = window.location.hash || '';
+            if (hash.startsWith('#join/')) {
+                return decodeURIComponent(hash.substring(6));
+            }
+            return null;
+        }
+
+        var joinPayload = getJoinPayload();
+
         var Module = {
             canvas: document.getElementById('canvas'),
+            arguments: joinPayload ? ['join', joinPayload] : [],
             setStatus: function (text) {
                 var status = document.getElementById('status');
                 var progress = document.getElementById('progress');
@@ -182,7 +247,7 @@
                 if (controls) {
                     controls.style.display = 'flex';
                 }
-                Module.setStatus('Ready');
+                Module.setStatus(joinPayload ? 'Joining match...' : 'Ready');
             },
             totalDependencies: 0,
             monitorRunDependencies: function (left) {
@@ -202,6 +267,42 @@
                 document.exitFullscreen();
             } else if (canvas.requestFullscreen) {
                 canvas.requestFullscreen();
+            }
+        }
+
+        if (joinPayload) {
+            var joinPanel = document.getElementById('join-panel');
+            var payloadArea = document.getElementById('join-payload');
+            var payloadText = document.getElementById('join-payload-text');
+            var showButton = document.getElementById('join-show-payload');
+            var copyButton = document.getElementById('join-copy-command');
+
+            if (payloadText) {
+                payloadText.value = joinPayload;
+            }
+            if (joinPanel) {
+                joinPanel.style.display = 'flex';
+            }
+            if (showButton && payloadArea) {
+                showButton.addEventListener('click', function () {
+                    payloadArea.style.display = payloadArea.style.display === 'flex' ? 'none' : 'flex';
+                    showButton.textContent = payloadArea.style.display === 'flex' ? 'Hide payload' : 'Show payload';
+                });
+            }
+            if (copyButton) {
+                copyButton.addEventListener('click', function () {
+                    var command = 'tankgame join ' + joinPayload;
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(command).then(function () {
+                            copyButton.textContent = 'Copied!';
+                            setTimeout(function () {
+                                copyButton.textContent = 'Copy desktop command';
+                            }, 2000);
+                        });
+                    } else {
+                        window.prompt('Copy command:', command);
+                    }
+                });
             }
         }
     </script>

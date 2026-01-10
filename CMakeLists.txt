@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(tankgame C)
+project(tankgame C CXX)
 
 if(APPLE AND NOT EMSCRIPTEN)
     enable_language(OBJC)
@@ -7,6 +7,8 @@ endif()
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Build type configuration
@@ -131,13 +133,23 @@ set(EDITOR_SOURCES
     src/editor/pz_editor_ui.c
 )
 
-set(NET_SOURCES
-    src/net/pz_net.c
-    src/net/pz_net_webrtc.c
-    # src/net/pz_protocol.c
-    # src/net/pz_client.c
-    # src/net/pz_server.c
-)
+if(EMSCRIPTEN)
+    set(NET_SOURCES
+        src/net/pz_net.c
+        src/net/pz_net_webrtc_wasm.cpp
+        # src/net/pz_protocol.c
+        # src/net/pz_client.c
+        # src/net/pz_server.c
+    )
+else()
+    set(NET_SOURCES
+        src/net/pz_net.c
+        src/net/pz_net_webrtc.c
+        # src/net/pz_protocol.c
+        # src/net/pz_client.c
+        # src/net/pz_server.c
+    )
+endif()
 
 # Main executable
 add_executable(tankgame
@@ -164,6 +176,12 @@ if(PZ_ENABLE_WEBRTC AND NOT EMSCRIPTEN)
     set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
     add_subdirectory(third_party/libdatachannel EXCLUDE_FROM_ALL)
     target_link_libraries(tankgame PRIVATE datachannel)
+    target_compile_definitions(tankgame PRIVATE PZ_ENABLE_WEBRTC)
+endif()
+
+if(EMSCRIPTEN)
+    add_subdirectory(third_party/datachannel-wasm EXCLUDE_FROM_ALL)
+    target_link_libraries(tankgame PRIVATE datachannel-wasm)
     target_compile_definitions(tankgame PRIVATE PZ_ENABLE_WEBRTC)
 endif()
 

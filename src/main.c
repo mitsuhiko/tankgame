@@ -241,6 +241,7 @@ typedef struct app_state {
     const char *map_path_arg;
     const char *campaign_path_arg;
     const char *edit_map_path_arg; // --edit-map <path>
+    const char *join_payload_arg; // join <payload>
     bool show_debug_overlay;
     bool show_debug_texture_scale;
     const char *debug_script_path_arg; // --debug-script-file <file>
@@ -835,7 +836,8 @@ static void
 print_help(const char *program_name)
 {
     printf("Tank Game\n\n");
-    printf("Usage: %s [options]\n\n", program_name);
+    printf("Usage: %s [options]\n", program_name);
+    printf("       %s join <payload>\n\n", program_name);
     printf("Options:\n");
     printf("  --help                    Show this help message and exit\n");
     printf("  --map <path>              Load a specific map file\n");
@@ -846,6 +848,9 @@ print_help(const char *program_name)
     printf("  --debug-script-file <path> Run debug script from file\n");
     printf("  --debug-texture-scale     Enable texture scale debugging\n");
     printf("  --lightmap-debug <path>   Export lightmap to file\n");
+    printf("\nNetworking:\n");
+    printf("  join <payload>            Join a WebRTC game using a join "
+           "payload\n");
     printf("\nDebug Script Examples:\n");
     printf("  --debug-script \"frames 3; screenshot test.png; quit\"\n");
     printf("  --debug-script \"input +up; frames 60; screenshot moved.png; "
@@ -860,6 +865,7 @@ parse_args(int argc, char *argv[])
     g_app.map_path_arg = NULL;
     g_app.campaign_path_arg = NULL;
     g_app.edit_map_path_arg = NULL;
+    g_app.join_payload_arg = NULL;
     g_app.show_debug_overlay = false;
     g_app.show_debug_texture_scale = false;
     g_app.debug_script_path_arg = NULL;
@@ -880,7 +886,13 @@ parse_args(int argc, char *argv[])
 
     // Second pass: parse arguments
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--lightmap-debug") == 0) {
+        if (strcmp(argv[i], "join") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: join requires a payload\n");
+                exit(1);
+            }
+            g_app.join_payload_arg = argv[++i];
+        } else if (strcmp(argv[i], "--lightmap-debug") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "error: --lightmap-debug requires a path\n");
                 exit(1);

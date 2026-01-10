@@ -26,13 +26,16 @@ We use **WebRTC DataChannels** for all networking:
 | Platform | Library |
 |----------|---------|
 | Desktop (C) | libdatachannel |
-| Browser (WASM) | Native RTCPeerConnection API |
+| Browser (WASM) | Native RTCPeerConnection API (default) |
+| Browser (WASM) | libdatachannel via datachannel-wasm (optional) |
 
 **libdatachannel:** https://github.com/paullouisageneau/libdatachannel
 - Clean C API
 - Small footprint (~50KB)
 - MIT license
 - DataChannel-focused (no overkill video/audio code)
+- Can compile to WebAssembly via datachannel-wasm for code reuse
+- https://github.com/paullouisageneau/datachannel-wasm
 
 ## Connection Handshake: QR Code + URL
 

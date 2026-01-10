@@ -8,6 +8,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct pz_net_webrtc pz_net_webrtc;
 
 typedef struct pz_net_webrtc_config {
@@ -22,5 +26,9 @@ void pz_net_webrtc_destroy(pz_net_webrtc *net);
 char *pz_net_webrtc_create_offer(pz_net_webrtc *net, uint32_t timeout_ms);
 bool pz_net_webrtc_set_remote_offer(pz_net_webrtc *net, const char *sdp);
 char *pz_net_webrtc_create_answer(pz_net_webrtc *net, uint32_t timeout_ms);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PZ_NET_WEBRTC_H
