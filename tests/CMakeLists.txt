@@ -110,3 +110,16 @@ target_include_directories(test_toxic_cloud PRIVATE
 target_compile_definitions(test_toxic_cloud PRIVATE PZ_DEBUG)
 target_link_libraries(test_toxic_cloud PRIVATE m)
 add_test(NAME toxic_cloud COMMAND test_toxic_cloud)
+
+# Networking offer URL tests
+add_executable(test_net_offer test_net_offer.c
+    ../src/net/pz_net.c
+    ../src/core/pz_mem.c
+    ../src/core/pz_str.c
+)
+target_include_directories(test_net_offer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(test_net_offer PRIVATE PZ_DEBUG)
+add_test(NAME net_offer COMMAND test_net_offer)

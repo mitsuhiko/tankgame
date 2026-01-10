@@ -17,6 +17,7 @@ endif()
 set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Dev" "Release")
 
 option(PZ_WEB_BUILD "Build WebAssembly version" OFF)
+option(PZ_ENABLE_WEBRTC "Enable WebRTC networking" OFF)
 if(PZ_WEB_BUILD AND NOT EMSCRIPTEN)
     message(FATAL_ERROR "PZ_WEB_BUILD requires the Emscripten toolchain.")
 endif()
@@ -131,7 +132,7 @@ set(EDITOR_SOURCES
 )
 
 set(NET_SOURCES
-    # src/net/pz_net.c
+    src/net/pz_net.c
     # src/net/pz_protocol.c
     # src/net/pz_client.c
     # src/net/pz_server.c
@@ -153,6 +154,21 @@ target_include_directories(tankgame PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/third_party/sokol
 )
+
+if(PZ_ENABLE_WEBRTC AND NOT EMSCRIPTEN)
+    include(FetchContent)
+    FetchContent_Declare(
+        libdatachannel
+        GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
+        GIT_TAG v0.20.0
+    )
+    set(NO_MEDIA ON CACHE BOOL "" FORCE)
+    set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(libdatachannel)
+    target_link_libraries(tankgame PRIVATE datachannel)
+    target_compile_definitions(tankgame PRIVATE PZ_ENABLE_WEBRTC)
+endif()
 
 # Shader compilation with sokol-shdc
 set(SHADER_INPUT ${CMAKE_SOURCE_DIR}/shaders/tankgame.glsl)
