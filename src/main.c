@@ -49,6 +49,7 @@
 #include "game/pz_toxic_cloud.h"
 #include "game/pz_tracks.h"
 #include "net/pz_net.h"
+#include "net/pz_net_webrtc.h"
 
 #define WINDOW_TITLE "Tank Game"
 #define WINDOW_WIDTH 1280
@@ -254,6 +255,8 @@ typedef struct app_state {
 
     // Networking
     pz_net_offer *join_offer;
+    char *join_answer;
+    pz_net_webrtc *net_webrtc;
 
     // Core systems (persistent across maps)
     pz_renderer *renderer;
@@ -875,6 +878,8 @@ parse_args(int argc, char *argv[])
     g_app.debug_script_path_arg = NULL;
     g_app.inline_script_arg = NULL;
     g_app.join_offer = NULL;
+    g_app.join_answer = NULL;
+    g_app.net_webrtc = NULL;
 
     // Track deprecated screenshot flags for combined error message
     const char *deprecated_screenshot_path = NULL;
@@ -1019,6 +1024,42 @@ app_init(void)
         pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
             "Join payload loaded: host=%s map=%s", g_app.join_offer->host_name,
             g_app.join_offer->map_name);
+
+        const char *ice_servers[] = { "stun:stun.l.google.com:19302",
+            "stun:stun.cloudflare.com:3478" };
+        pz_net_webrtc_config net_config = {
+            .ice_servers = ice_servers,
+            .ice_server_count
+            = (int)(sizeof(ice_servers) / sizeof(ice_servers[0])),
+            .enable_logging = true,
+        };
+
+        g_app.net_webrtc = pz_net_webrtc_create(&net_config);
+        if (!g_app.net_webrtc) {
+            pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+                "Failed to initialize WebRTC for join payload");
+            sapp_quit();
+            return;
+        }
+
+        if (!pz_net_webrtc_set_remote_offer(
+                g_app.net_webrtc, g_app.join_offer->sdp)) {
+            pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to apply join offer");
+            sapp_quit();
+            return;
+        }
+
+        g_app.join_answer
+            = pz_net_webrtc_create_answer(g_app.net_webrtc, 10000);
+        if (!g_app.join_answer) {
+            pz_log(
+                PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to create WebRTC answer");
+            sapp_quit();
+            return;
+        }
+
+        pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
+            "Join answer ready (send to host): %s", g_app.join_answer);
     }
 
     // Check environment variables for audio control
@@ -3467,6 +3508,8 @@ app_cleanup(void)
     pz_cursor_destroy(g_app.cursor);
     pz_debug_cmd_shutdown();
 
+    pz_free(g_app.join_answer);
+    pz_net_webrtc_destroy(g_app.net_webrtc);
     pz_net_offer_free(g_app.join_offer);
 
     if (g_app.laser_vb != PZ_INVALID_HANDLE) {
