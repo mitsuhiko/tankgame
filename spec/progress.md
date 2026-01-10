@@ -119,7 +119,8 @@
 
 ## Phase 13: Networking Foundation
 - [ ] M13.1: libdatachannel integration (in progress)
-- [ ] M13.3: offer URL encoding (in progress)
+- [ ] M13.2: WebRTC wrapper (in progress)
+- [x] M13.3: offer URL encoding
 
 ## Phase 16: Polish and Game Feel (partial)
 - [x] M16.2: particle system (smoke, fog, impact particles)

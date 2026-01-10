@@ -7,3 +7,6 @@
 [submodule "third_party/sokol-tools-bin"]
 	path = third_party/sokol-tools-bin
 	url = https://github.com/floooh/sokol-tools-bin
+[submodule "third_party/libdatachannel"]
+	path = third_party/libdatachannel
+	url = https://github.com/paullouisageneau/libdatachannel.git
