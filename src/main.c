@@ -661,8 +661,7 @@ net_signaling_answer_received(const char *message, void *user_data)
 {
     (void)user_data;
     if (!message) {
-        pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET,
-            "Signaling answer fetch failed, retrying");
+        // Silently retry - this happens during normal polling
         if (g_app.net_waiting_for_answer && g_app.net_room_code[0] != '\0') {
             pz_signaling_fetch(
                 g_app.net_room_code, "a", net_signaling_answer_received, NULL);
