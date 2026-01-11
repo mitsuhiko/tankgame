@@ -137,6 +137,7 @@ if(EMSCRIPTEN)
     set(NET_SOURCES
         src/net/pz_net.c
         src/net/pz_net_webrtc_wasm.cpp
+        src/net/pz_net_signaling_wasm.cpp
         # src/net/pz_protocol.c
         # src/net/pz_client.c
         # src/net/pz_server.c
@@ -145,6 +146,7 @@ else()
     set(NET_SOURCES
         src/net/pz_net.c
         src/net/pz_net_webrtc.c
+        src/net/pz_net_signaling.c
         # src/net/pz_protocol.c
         # src/net/pz_client.c
         # src/net/pz_server.c

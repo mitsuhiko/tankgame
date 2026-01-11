@@ -22,8 +22,10 @@ pz_net_offer *pz_net_offer_create(uint32_t version, const char *host_name,
     const char *map_name, const char *sdp);
 void pz_net_offer_free(pz_net_offer *offer);
 
+char *pz_net_offer_encode_json(const pz_net_offer *offer);
 char *pz_net_offer_encode_url(const pz_net_offer *offer);
 
+pz_net_offer *pz_net_offer_decode_json(const char *json);
 pz_net_offer *pz_net_offer_decode_url(const char *url);
 
 #endif // PZ_NET_H

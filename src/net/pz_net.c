@@ -361,7 +361,7 @@ pz_net_offer_free(pz_net_offer *offer)
 }
 
 char *
-pz_net_offer_encode_url(const pz_net_offer *offer)
+pz_net_offer_encode_json(const pz_net_offer *offer)
 {
     if (!offer)
         return NULL;
@@ -385,6 +385,16 @@ pz_net_offer_encode_url(const pz_net_offer *offer)
     pz_free(map_name);
     pz_free(sdp);
 
+    return json;
+}
+
+char *
+pz_net_offer_encode_url(const pz_net_offer *offer)
+{
+    if (!offer)
+        return NULL;
+
+    char *json = pz_net_offer_encode_json(offer);
     if (!json)
         return NULL;
 
@@ -415,6 +425,55 @@ pz_net_find_offer_token(const char *url)
         return url + prefix_len;
 
     return url;
+}
+
+static pz_net_offer *
+pz_net_offer_decode_json_internal(const char *json)
+{
+    if (!json)
+        return NULL;
+
+    uint32_t version = 0;
+    char *name = NULL;
+    char *map = NULL;
+    char *sdp = NULL;
+
+    bool ok = pz_net_json_find_uint(json, "v", &version)
+        && pz_net_json_find_string(json, "name", &name)
+        && pz_net_json_find_string(json, "map", &map)
+        && pz_net_json_find_string(json, "sdp", &sdp);
+
+    if (!ok) {
+        pz_free(name);
+        pz_free(map);
+        pz_free(sdp);
+        return NULL;
+    }
+
+    pz_net_offer *offer = pz_net_offer_create(version, name, map, sdp);
+
+    pz_free(name);
+    pz_free(map);
+    pz_free(sdp);
+
+    return offer;
+}
+
+pz_net_offer *
+pz_net_offer_decode_json(const char *json)
+{
+    if (!json)
+        return NULL;
+
+    char *trimmed = pz_str_trim(json);
+    if (!trimmed || trimmed[0] == '\0') {
+        pz_free(trimmed);
+        return NULL;
+    }
+
+    pz_net_offer *offer = pz_net_offer_decode_json_internal(trimmed);
+    pz_free(trimmed);
+    return offer;
 }
 
 pz_net_offer *
@@ -469,30 +528,8 @@ pz_net_offer_decode_url(const char *url)
     if (!json)
         return NULL;
 
-    uint32_t version = 0;
-    char *name = NULL;
-    char *map = NULL;
-    char *sdp = NULL;
-
-    bool ok = pz_net_json_find_uint(json, "v", &version)
-        && pz_net_json_find_string(json, "name", &name)
-        && pz_net_json_find_string(json, "map", &map)
-        && pz_net_json_find_string(json, "sdp", &sdp);
-
+    pz_net_offer *offer = pz_net_offer_decode_json_internal(json);
     pz_free(json);
-
-    if (!ok) {
-        pz_free(name);
-        pz_free(map);
-        pz_free(sdp);
-        return NULL;
-    }
-
-    pz_net_offer *offer = pz_net_offer_create(version, name, map, sdp);
-
-    pz_free(name);
-    pz_free(map);
-    pz_free(sdp);
 
     return offer;
 }

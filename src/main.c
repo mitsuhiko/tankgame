@@ -2,6 +2,7 @@
  * Tank Game - Main Entry Point
  */
 
+#include <ctype.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -50,6 +51,7 @@
 #include "game/pz_toxic_cloud.h"
 #include "game/pz_tracks.h"
 #include "net/pz_net.h"
+#include "net/pz_net_signaling.h"
 #include "net/pz_net_webrtc.h"
 
 #define WINDOW_TITLE "Tank Game"
@@ -281,6 +283,11 @@ typedef struct app_state {
     // Networking
     bool net_is_host;
     bool net_is_client;
+    bool net_share_enabled;
+    bool net_use_signaling;
+    bool net_waiting_for_offer;
+    bool net_waiting_for_answer;
+    char net_room_code[8];
     const char *net_answer_payload_arg;
     atomic_bool net_channel_open;
     uint32_t net_last_sent_tick;
@@ -291,6 +298,7 @@ typedef struct app_state {
     pz_tank *net_remote_tank;
     pz_net_offer *join_offer;
     char *join_answer;
+    char *join_answer_json;
     pz_net_webrtc *net_webrtc;
 
     // Core systems (persistent across maps)
@@ -494,6 +502,26 @@ net_handle_message(const uint8_t *data, size_t len, void *user_data)
 }
 
 static bool
+net_apply_answer_offer(pz_net_offer *answer_offer)
+{
+    if (!answer_offer || !g_app.net_webrtc)
+        return false;
+
+    bool ok
+        = pz_net_webrtc_set_remote_answer(g_app.net_webrtc, answer_offer->sdp);
+    if (!ok) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "Failed to apply WebRTC answer payload");
+    } else {
+        g_app.net_waiting_for_answer = false;
+        pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Applied answer payload from %s",
+            answer_offer->host_name);
+    }
+
+    return ok;
+}
+
+static bool
 net_apply_answer_payload(const char *payload)
 {
     if (!payload || !g_app.net_webrtc)
@@ -505,18 +533,194 @@ net_apply_answer_payload(const char *payload)
         return false;
     }
 
-    bool ok
-        = pz_net_webrtc_set_remote_answer(g_app.net_webrtc, answer_offer->sdp);
-    if (!ok) {
-        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
-            "Failed to apply WebRTC answer payload");
-    } else {
-        pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Applied answer payload from %s",
-            answer_offer->host_name);
-    }
-
+    bool ok = net_apply_answer_offer(answer_offer);
     pz_net_offer_free(answer_offer);
     return ok;
+}
+
+static bool map_session_load(map_session *session, const char *map_path);
+
+static bool
+net_setup_client_from_offer(pz_net_offer *offer)
+{
+    if (!offer)
+        return false;
+
+    if (g_app.join_offer && g_app.join_offer != offer) {
+        pz_net_offer_free(g_app.join_offer);
+    }
+    g_app.join_offer = offer;
+
+    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Join offer loaded: host=%s map=%s",
+        g_app.join_offer->host_name, g_app.join_offer->map_name);
+
+    if (!g_app.map_path_arg && g_app.join_offer->map_name[0] != '\0') {
+        g_app.map_path_arg = g_app.join_offer->map_name;
+    }
+
+    if (g_app.session.map_path && g_app.join_offer->map_name[0] != '\0'
+        && strcmp(g_app.session.map_path, g_app.join_offer->map_name) != 0) {
+        if (!map_session_load(&g_app.session, g_app.join_offer->map_name)) {
+            pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+                "Failed to load map from join offer");
+            return false;
+        }
+    }
+
+    if (!g_app.net_webrtc) {
+        const char *ice_servers[] = { "stun:stun.l.google.com:19302",
+            "stun:stun.cloudflare.com:3478" };
+        pz_net_webrtc_config net_config = {
+            .ice_servers = ice_servers,
+            .ice_server_count
+            = (int)(sizeof(ice_servers) / sizeof(ice_servers[0])),
+            .enable_logging = true,
+        };
+
+        g_app.net_webrtc = pz_net_webrtc_create(&net_config);
+        if (!g_app.net_webrtc) {
+            pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+                "Failed to initialize WebRTC for join offer");
+            return false;
+        }
+
+        pz_net_webrtc_set_message_callback(
+            g_app.net_webrtc, net_handle_message, NULL);
+        pz_net_webrtc_set_channel_callback(
+            g_app.net_webrtc, net_handle_channel_state, NULL);
+    }
+
+    if (!pz_net_webrtc_set_remote_offer(
+            g_app.net_webrtc, g_app.join_offer->sdp)) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to apply join offer");
+        return false;
+    }
+
+    char *answer_sdp = pz_net_webrtc_create_answer(g_app.net_webrtc, 10000);
+    if (!answer_sdp) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to create WebRTC answer");
+        return false;
+    }
+
+    pz_net_offer *answer_offer = pz_net_offer_create(
+        1, "client", g_app.join_offer->map_name, answer_sdp);
+    char *answer_payload = pz_net_offer_encode_url(answer_offer);
+    char *answer_json = pz_net_offer_encode_json(answer_offer);
+    pz_net_offer_free(answer_offer);
+    pz_free(answer_sdp);
+
+    if (!answer_payload || !answer_json) {
+        pz_free(answer_payload);
+        pz_free(answer_json);
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "Failed to encode WebRTC answer payload");
+        return false;
+    }
+
+    pz_free(g_app.join_answer);
+    pz_free(g_app.join_answer_json);
+    g_app.join_answer = answer_payload;
+    g_app.join_answer_json = answer_json;
+
+    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Join answer ready (send to host): %s",
+        g_app.join_answer);
+
+    return true;
+}
+
+static void
+net_signaling_publish_offer_done(bool success, void *user_data)
+{
+    (void)user_data;
+    if (success) {
+        pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Signaling offer published");
+    } else {
+        pz_log(
+            PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to publish signaling offer");
+    }
+}
+
+static void
+net_signaling_publish_answer_done(bool success, void *user_data)
+{
+    (void)user_data;
+    if (success) {
+        pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Signaling answer published");
+    } else {
+        pz_log(
+            PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to publish signaling answer");
+    }
+}
+
+static void
+net_signaling_answer_received(const char *message, void *user_data)
+{
+    (void)user_data;
+    if (!message) {
+        pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET,
+            "Signaling answer fetch failed, retrying");
+        if (g_app.net_waiting_for_answer && g_app.net_room_code[0] != '\0') {
+            pz_signaling_fetch(
+                g_app.net_room_code, "a", net_signaling_answer_received, NULL);
+        }
+        return;
+    }
+
+    pz_net_offer *answer_offer = pz_net_offer_decode_json(message);
+    if (!answer_offer) {
+        answer_offer = pz_net_offer_decode_url(message);
+    }
+
+    if (!answer_offer) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "Invalid signaling answer payload provided");
+        return;
+    }
+
+    net_apply_answer_offer(answer_offer);
+    pz_net_offer_free(answer_offer);
+}
+
+static void
+net_signaling_offer_received(const char *message, void *user_data)
+{
+    (void)user_data;
+    if (!message) {
+        pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET,
+            "Signaling offer fetch failed, retrying");
+        if (g_app.net_waiting_for_offer && g_app.net_room_code[0] != '\0') {
+            pz_signaling_fetch(
+                g_app.net_room_code, "o", net_signaling_offer_received, NULL);
+        }
+        return;
+    }
+
+    g_app.net_waiting_for_offer = false;
+
+    pz_net_offer *offer = pz_net_offer_decode_json(message);
+    if (!offer) {
+        offer = pz_net_offer_decode_url(message);
+    }
+    if (!offer) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "Received invalid signaling offer payload");
+        return;
+    }
+
+    if (!net_setup_client_from_offer(offer)) {
+        if (g_app.join_offer == offer)
+            g_app.join_offer = NULL;
+        pz_net_offer_free(offer);
+        return;
+    }
+
+    if (g_app.net_room_code[0] != '\0' && g_app.join_answer_json) {
+        pz_signaling_publish(g_app.net_room_code, "a", g_app.join_answer_json,
+            net_signaling_publish_answer_done, NULL);
+    } else if (g_app.net_room_code[0] != '\0') {
+        pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET,
+            "No signaling answer payload available to publish");
+    }
 }
 
 static bool
@@ -583,7 +787,6 @@ static const float LASER_MAX_DIST = 50.0f;
 
 // Forward declarations
 static void map_session_unload(map_session *session);
-static bool map_session_load(map_session *session, const char *map_path);
 static void fog_marks_clear(map_session *session);
 static void audio_callback(
     float *buffer, int num_frames, int num_channels, void *userdata);
@@ -1143,13 +1346,33 @@ fog_marks_emit(map_session *session)
 // Argument Parsing
 // ============================================================================
 
+static bool
+net_is_room_code(const char *value, char *out_code, size_t out_size)
+{
+    if (!value || !out_code || out_size < 7)
+        return false;
+
+    size_t len = strlen(value);
+    if (len != 6)
+        return false;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (!isxdigit(c))
+            return false;
+        out_code[i] = (char)tolower(c);
+    }
+    out_code[len] = '\0';
+    return true;
+}
+
 static void
 print_help(const char *program_name)
 {
     printf("Tank Game\n\n");
     printf("Usage: %s [options]\n", program_name);
     printf("       %s host [--net-answer <payload>]\n", program_name);
-    printf("       %s join <payload>\n\n", program_name);
+    printf("       %s join <payload|room>\n\n", program_name);
     printf("Options:\n");
     printf("  --help                    Show this help message and exit\n");
     printf("  --map <path>              Load a specific map file\n");
@@ -1161,10 +1384,11 @@ print_help(const char *program_name)
     printf("  --debug-texture-scale     Enable texture scale debugging\n");
     printf("  --lightmap-debug <path>   Export lightmap to file\n");
     printf("\nNetworking:\n");
-    printf("  host                      Host a WebRTC game and print a join "
-           "payload\n");
+    printf("  host                      Host a WebRTC game via ntfy.sh\n");
     printf("  join <payload>            Join a WebRTC game using a join "
            "payload\n");
+    printf(
+        "  join <room>               Join a WebRTC game using a room code\n");
     printf(
         "  --net-answer <payload>    Apply a WebRTC answer payload (host)\n");
     printf("\nDebug Script Examples:\n");
@@ -1188,12 +1412,18 @@ parse_args(int argc, char *argv[])
     g_app.inline_script_arg = NULL;
     g_app.net_is_host = false;
     g_app.net_is_client = false;
+    g_app.net_share_enabled = false;
+    g_app.net_use_signaling = false;
+    g_app.net_waiting_for_offer = false;
+    g_app.net_waiting_for_answer = false;
+    g_app.net_room_code[0] = '\0';
     g_app.net_answer_payload_arg = NULL;
     g_app.net_last_sent_tick = UINT32_MAX;
     g_app.net_has_remote_input = false;
     g_app.net_remote_tank = NULL;
     g_app.join_offer = NULL;
     g_app.join_answer = NULL;
+    g_app.join_answer_json = NULL;
     g_app.net_webrtc = NULL;
 
     // Track deprecated screenshot flags for combined error message
@@ -1215,11 +1445,20 @@ parse_args(int argc, char *argv[])
             g_app.net_is_host = true;
         } else if (strcmp(argv[i], "join") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "error: join requires a payload\n");
+                fprintf(stderr, "error: join requires a payload or room\n");
                 exit(1);
             }
             g_app.net_is_client = true;
-            g_app.join_payload_arg = argv[++i];
+            const char *join_arg = argv[++i];
+            if (net_is_room_code(join_arg, g_app.net_room_code,
+                    sizeof(g_app.net_room_code))) {
+                g_app.net_use_signaling = true;
+            } else {
+                g_app.join_payload_arg = join_arg;
+            }
+        } else if (strcmp(argv[i], "--share") == 0) {
+            g_app.net_share_enabled = true;
+            g_app.net_use_signaling = true;
         } else if (strcmp(argv[i], "--net-answer") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "error: --net-answer requires a payload\n");
@@ -1299,6 +1538,12 @@ parse_args(int argc, char *argv[])
         exit(1);
     }
 
+    if (g_app.net_is_host) {
+        g_app.net_share_enabled = true;
+        g_app.net_use_signaling = true;
+    }
+
+
     // Show combined error for deprecated screenshot flags
     if (deprecated_screenshot_path || deprecated_screenshot_frames) {
         const char *path = deprecated_screenshot_path
@@ -1350,73 +1595,33 @@ app_init(void)
     g_app.net_last_remote_input = (pz_tank_input) { 0 };
 
     if (g_app.join_payload_arg) {
-        g_app.join_offer = pz_net_offer_decode_url(g_app.join_payload_arg);
-        if (!g_app.join_offer) {
+        pz_net_offer *offer = pz_net_offer_decode_url(g_app.join_payload_arg);
+        if (!offer) {
             pz_log(
                 PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Invalid join payload provided");
             sapp_quit();
             return;
         }
+
+        if (!net_setup_client_from_offer(offer)) {
+            pz_net_offer_free(offer);
+            g_app.join_offer = NULL;
+            sapp_quit();
+            return;
+        }
+    }
+
+    if (g_app.net_use_signaling && g_app.net_is_client
+        && g_app.net_room_code[0] != '\0' && !g_app.join_payload_arg) {
+        g_app.net_waiting_for_offer = true;
         pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
-            "Join payload loaded: host=%s map=%s", g_app.join_offer->host_name,
-            g_app.join_offer->map_name);
+            "Waiting for signaling offer in room %s", g_app.net_room_code);
+        pz_signaling_fetch(
+            g_app.net_room_code, "o", net_signaling_offer_received, NULL);
+    }
 
-        if (!g_app.map_path_arg && g_app.join_offer->map_name[0] != '\0') {
-            g_app.map_path_arg = g_app.join_offer->map_name;
-        }
-
-        const char *ice_servers[] = { "stun:stun.l.google.com:19302",
-            "stun:stun.cloudflare.com:3478" };
-        pz_net_webrtc_config net_config = {
-            .ice_servers = ice_servers,
-            .ice_server_count
-            = (int)(sizeof(ice_servers) / sizeof(ice_servers[0])),
-            .enable_logging = true,
-        };
-
-        g_app.net_webrtc = pz_net_webrtc_create(&net_config);
-        if (!g_app.net_webrtc) {
-            pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
-                "Failed to initialize WebRTC for join payload");
-            sapp_quit();
-            return;
-        }
-
-        pz_net_webrtc_set_message_callback(
-            g_app.net_webrtc, net_handle_message, NULL);
-        pz_net_webrtc_set_channel_callback(
-            g_app.net_webrtc, net_handle_channel_state, NULL);
-
-        if (!pz_net_webrtc_set_remote_offer(
-                g_app.net_webrtc, g_app.join_offer->sdp)) {
-            pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to apply join offer");
-            sapp_quit();
-            return;
-        }
-
-        char *answer_sdp = pz_net_webrtc_create_answer(g_app.net_webrtc, 10000);
-        if (!answer_sdp) {
-            pz_log(
-                PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to create WebRTC answer");
-            sapp_quit();
-            return;
-        }
-
-        pz_net_offer *answer_offer = pz_net_offer_create(
-            1, "client", g_app.join_offer->map_name, answer_sdp);
-        g_app.join_answer = pz_net_offer_encode_url(answer_offer);
-        pz_net_offer_free(answer_offer);
-        pz_free(answer_sdp);
-
-        if (!g_app.join_answer) {
-            pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
-                "Failed to encode WebRTC answer payload");
-            sapp_quit();
-            return;
-        }
-
-        pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
-            "Join answer ready (send to host): %s", g_app.join_answer);
+    if (g_app.net_is_client && !g_app.map_path_arg) {
+        g_app.map_path_arg = "assets/maps/night_arena.map";
     }
 
     // Check environment variables for audio control
@@ -1683,23 +1888,30 @@ app_init(void)
 
             pz_net_offer *offer = pz_net_offer_create(
                 1, "host", g_app.session.map_path, offer_sdp);
-            char *offer_payload = pz_net_offer_encode_url(offer);
+            char *offer_json = pz_net_offer_encode_json(offer);
             pz_net_offer_free(offer);
             pz_free(offer_sdp);
 
-            if (!offer_payload) {
+            if (!offer_json) {
                 pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
-                    "Failed to encode WebRTC offer payload");
+                    "Failed to encode signaling offer payload");
                 sapp_quit();
                 return;
             }
 
+            const char *room = pz_signaling_generate_room();
+            strncpy(g_app.net_room_code, room, sizeof(g_app.net_room_code) - 1);
+            g_app.net_room_code[sizeof(g_app.net_room_code) - 1] = '\0';
+            g_app.net_waiting_for_answer = true;
+            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Signaling room code: %s",
+                g_app.net_room_code);
             pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
-                "Host offer ready (share with clients): %s", offer_payload);
-            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
-                "Use --net-answer or 'webrtc_answer <payload>' via command "
-                "pipe to complete connection");
-            pz_free(offer_payload);
+                "Join with: ./tankgame join %s", g_app.net_room_code);
+            pz_signaling_publish(g_app.net_room_code, "o", offer_json,
+                net_signaling_publish_offer_done, NULL);
+            pz_signaling_fetch(g_app.net_room_code, "a",
+                net_signaling_answer_received, NULL);
+            pz_free(offer_json);
 
             if (g_app.net_answer_payload_arg) {
                 if (!net_apply_answer_payload(g_app.net_answer_payload_arg)) {
@@ -1889,6 +2101,10 @@ app_frame(void)
                 = pz_debug_script_inject(g_app.debug_script, pipe_commands);
         }
         pz_free(pipe_commands);
+    }
+
+    if (g_app.net_use_signaling) {
+        pz_signaling_update();
     }
 
     // Process debug script commands (may trigger actions like load map,
@@ -4129,8 +4345,10 @@ app_cleanup(void)
     pz_debug_cmd_shutdown();
 
     pz_free(g_app.join_answer);
+    pz_free(g_app.join_answer_json);
     pz_net_webrtc_destroy(g_app.net_webrtc);
     pz_net_offer_free(g_app.join_offer);
+    pz_signaling_shutdown();
 
     if (g_app.laser_vb != PZ_INVALID_HANDLE) {
         pz_renderer_destroy_buffer(g_app.renderer, g_app.laser_vb);
