@@ -126,6 +126,86 @@
         .controls-right {
             display: flex;
             gap: 8px;
+            align-items: center;
+        }
+        .host-controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        select {
+            appearance: none;
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 10px 32px 10px 14px;
+            font-size: 13px;
+            cursor: pointer;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23e8edf3' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+        }
+        select:hover {
+            border-color: rgba(93, 211, 158, 0.5);
+            background-color: rgba(93, 211, 158, 0.1);
+        }
+        .host-info {
+            display: none;
+            margin-top: 16px;
+            padding: 16px;
+            border-radius: 14px;
+            border: 1px solid rgba(93, 211, 158, 0.3);
+            background: rgba(93, 211, 158, 0.08);
+        }
+        .host-info h3 {
+            font-size: 14px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--accent-2);
+            margin-bottom: 12px;
+        }
+        .host-info-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .host-info-row:last-child {
+            margin-bottom: 0;
+        }
+        .host-info-label {
+            font-size: 13px;
+            color: var(--muted);
+            min-width: 80px;
+        }
+        .host-info-value {
+            font-size: 13px;
+            color: var(--text);
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 6px 10px;
+            border-radius: 6px;
+            flex: 1;
+            word-break: break-all;
+        }
+        .host-info-value.room-code {
+            font-size: 18px;
+            font-weight: bold;
+            letter-spacing: 2px;
+            color: var(--accent-2);
+        }
+        .copy-btn {
+            padding: 6px 10px;
+            font-size: 12px;
+        }
+        .host-status {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 8px;
+        }
+        .host-status.connected {
+            color: var(--accent-2);
         }
         button {
             appearance: none;
@@ -197,6 +277,26 @@
                 </div>
             </div>
             <div class="controls-right" id="controls" style="display: none;">
+                <div class="host-controls" id="host-controls">
+                    <select id="map-select">
+                        <option value="">Select map...</option>
+                        <option value="assets/maps/test_arena.map">Test Arena</option>
+                        <option value="assets/maps/night_arena.map">Night Arena</option>
+                        <option value="assets/maps/day_arena.map">Day Arena</option>
+                        <option value="assets/maps/fjord.map">Fjord</option>
+                        <option value="assets/maps/fjord_jump.map">Fjord Jump</option>
+                        <option value="assets/maps/canyon_crossing.map">Canyon Crossing</option>
+                        <option value="assets/maps/dawn_waterway.map">Dawn Waterway</option>
+                        <option value="assets/maps/lava_crossing.map">Lava Crossing</option>
+                        <option value="assets/maps/volcanic_ridge.map">Volcanic Ridge</option>
+                        <option value="assets/maps/midnight_maze.map">Midnight Maze</option>
+                        <option value="assets/maps/frozen_peaks.map">Frozen Peaks</option>
+                        <option value="assets/maps/toxic_dawn.map">Toxic Dawn</option>
+                        <option value="assets/maps/adrian_arena.map">Adrian Arena</option>
+                        <option value="assets/maps/martin_arena.map">Martin Arena</option>
+                    </select>
+                    <button type="button" id="host-btn" onclick="startHost()">Host</button>
+                </div>
                 <button type="button" onclick="toggleFullscreen()">Fullscreen</button>
             </div>
         </div>
@@ -211,6 +311,21 @@
             <div class="join-payload" id="join-payload">
                 <textarea id="join-payload-text" readonly></textarea>
             </div>
+        </div>
+
+        <div class="host-info" id="host-info">
+            <h3>Hosting Game</h3>
+            <div class="host-info-row">
+                <span class="host-info-label">Room Code</span>
+                <span class="host-info-value room-code" id="host-room-code">------</span>
+                <button type="button" class="copy-btn" onclick="copyRoomCode(this)">Copy</button>
+            </div>
+            <div class="host-info-row">
+                <span class="host-info-label">Join Link</span>
+                <span class="host-info-value" id="host-join-link">...</span>
+                <button type="button" class="copy-btn" onclick="copyJoinLink(this)">Copy</button>
+            </div>
+            <div class="host-status" id="host-status">Waiting for player to join...</div>
         </div>
     </div>
 
@@ -245,6 +360,76 @@
                 joinRoomCode = joinInfo.value;
             }
         }
+
+        (function setupConsoleForwarding() {
+            var endpoint = '/api/console';
+            var isSending = false;
+
+            function toMessage(args) {
+                return Array.prototype.slice.call(args).map(function (value) {
+                    if (value instanceof Error) {
+                        return value.stack || value.message;
+                    }
+                    if (typeof value === 'object') {
+                        try {
+                            return JSON.stringify(value);
+                        } catch (err) {
+                            return String(value);
+                        }
+                    }
+                    return String(value);
+                }).join(' ');
+            }
+
+            function forward(stream, message) {
+                if (isSending || !message) {
+                    return;
+                }
+                isSending = true;
+                fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ stream: stream, message: message })
+                }).catch(function () {
+                }).finally(function () {
+                    isSending = false;
+                });
+            }
+
+            var originalConsole = {
+                log: console.log.bind(console),
+                info: console.info.bind(console),
+                warn: console.warn.bind(console),
+                error: console.error.bind(console)
+            };
+
+            console.log = function () {
+                originalConsole.log.apply(console, arguments);
+                forward('stdout', toMessage(arguments));
+            };
+            console.info = function () {
+                originalConsole.info.apply(console, arguments);
+                forward('stdout', toMessage(arguments));
+            };
+            console.warn = function () {
+                originalConsole.warn.apply(console, arguments);
+                forward('stderr', toMessage(arguments));
+            };
+            console.error = function () {
+                originalConsole.error.apply(console, arguments);
+                forward('stderr', toMessage(arguments));
+            };
+
+            window.addEventListener('error', function (event) {
+                if (event && event.message) {
+                    forward('stderr', event.message + (event.filename ? ' (' + event.filename + ':' + event.lineno + ')' : ''));
+                }
+            });
+            window.addEventListener('unhandledrejection', function (event) {
+                var reason = event && event.reason ? event.reason : 'Unhandled promise rejection';
+                forward('stderr', String(reason));
+            });
+        })();
 
         var Module = {
             canvas: document.getElementById('canvas'),
@@ -291,13 +476,119 @@
             }
         }
 
+        var hostCheckInterval = null;
+
+        function startHost() {
+            var mapSelect = document.getElementById('map-select');
+            var mapPath = mapSelect ? mapSelect.value : '';
+            if (!mapPath) {
+                alert('Please select a map first');
+                return;
+            }
+
+            var hostBtn = document.getElementById('host-btn');
+            if (hostBtn) {
+                hostBtn.disabled = true;
+                hostBtn.textContent = 'Starting...';
+            }
+
+            // Call into WASM to start hosting
+            var result = Module.ccall('pz_web_start_host', 'number', ['string'], [mapPath]);
+            if (result) {
+                // Success - show host info panel
+                var hostControls = document.getElementById('host-controls');
+                var hostInfo = document.getElementById('host-info');
+                if (hostControls) {
+                    hostControls.style.display = 'none';
+                }
+                if (hostInfo) {
+                    hostInfo.style.display = 'block';
+                }
+                // Start polling for room code and connection status
+                updateHostInfo();
+                hostCheckInterval = setInterval(updateHostInfo, 500);
+            } else {
+                alert('Failed to start hosting. Check console for details.');
+                if (hostBtn) {
+                    hostBtn.disabled = false;
+                    hostBtn.textContent = 'Host';
+                }
+            }
+        }
+
+        function updateHostInfo() {
+            var roomCode = Module.ccall('pz_web_get_room_code', 'string', [], []);
+            var isConnected = Module.ccall('pz_web_is_peer_connected', 'number', [], []);
+
+            var roomCodeEl = document.getElementById('host-room-code');
+            var joinLinkEl = document.getElementById('host-join-link');
+            var statusEl = document.getElementById('host-status');
+
+            if (roomCode && roomCode.length > 0) {
+                if (roomCodeEl) {
+                    roomCodeEl.textContent = roomCode;
+                }
+                if (joinLinkEl) {
+                    var joinUrl = window.location.origin + window.location.pathname + '#join/' + roomCode;
+                    joinLinkEl.textContent = joinUrl;
+                }
+            }
+
+            if (statusEl) {
+                if (isConnected) {
+                    statusEl.textContent = 'Player connected!';
+                    statusEl.className = 'host-status connected';
+                    // Stop checking once connected
+                    if (hostCheckInterval) {
+                        clearInterval(hostCheckInterval);
+                        hostCheckInterval = null;
+                    }
+                } else {
+                    statusEl.textContent = 'Waiting for player to join...';
+                    statusEl.className = 'host-status';
+                }
+            }
+        }
+
+        function copyRoomCode(btn) {
+            var roomCode = document.getElementById('host-room-code');
+            if (roomCode && navigator.clipboard) {
+                navigator.clipboard.writeText(roomCode.textContent).then(function() {
+                    showCopyFeedback(btn);
+                });
+            }
+        }
+
+        function copyJoinLink(btn) {
+            var joinLink = document.getElementById('host-join-link');
+            if (joinLink && navigator.clipboard) {
+                navigator.clipboard.writeText(joinLink.textContent).then(function() {
+                    showCopyFeedback(btn);
+                });
+            }
+        }
+
+        function showCopyFeedback(btn) {
+            if (!btn) return;
+            var original = btn.textContent;
+            btn.textContent = 'Copied!';
+            setTimeout(function() {
+                btn.textContent = original;
+            }, 1500);
+        }
+
         if (joinInfo) {
             var joinPanel = document.getElementById('join-panel');
             var payloadArea = document.getElementById('join-payload');
             var payloadText = document.getElementById('join-payload-text');
             var showButton = document.getElementById('join-show-payload');
             var copyButton = document.getElementById('join-copy-command');
+            var hostControls = document.getElementById('host-controls');
 
+            // Hide host controls when joining
+            if (hostControls) {
+                hostControls.style.display = 'none';
+            }
             if (joinPanel) {
                 joinPanel.style.display = 'flex';
             }

@@ -247,7 +247,8 @@ if(EMSCRIPTEN)
         "SHELL:-s FETCH=1"
         "SHELL:-s ASYNCIFY=1"
         "SHELL:-s ASYNCIFY_STACK_SIZE=65536"
-        "SHELL:--preload-file ${PZ_WEB_ASSETS_DIR}@/assets"
+        "SHELL:-s EXPORTED_RUNTIME_METHODS=[ccall,cwrap]"
+        "SHELL:--preload-file ${PZ_WEB_ASSETS_DIR}@assets"
         "SHELL:--shell-file ${CMAKE_SOURCE_DIR}/web/shell.html"
     )
 else()

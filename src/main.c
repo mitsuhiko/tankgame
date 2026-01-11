@@ -54,6 +54,10 @@
 #include "net/pz_net_signaling.h"
 #include "net/pz_net_webrtc.h"
 
+#ifdef __EMSCRIPTEN__
+#    include <emscripten.h>
+#endif
+
 #define WINDOW_TITLE "Tank Game"
 #define WINDOW_WIDTH 1280
 #define WINDOW_HEIGHT 720
@@ -697,13 +701,18 @@ net_signaling_offer_received(const char *message, void *user_data)
 
     g_app.net_waiting_for_offer = false;
 
+    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
+        "Signaling offer received, len=%zu, first100='%.100s'", strlen(message),
+        message);
+
     pz_net_offer *offer = pz_net_offer_decode_json(message);
     if (!offer) {
         offer = pz_net_offer_decode_url(message);
     }
     if (!offer) {
         pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
-            "Received invalid signaling offer payload");
+            "Received invalid signaling offer payload (len=%zu)",
+            strlen(message));
         return;
     }
 
@@ -4473,6 +4482,139 @@ audio_callback(float *buffer, int num_frames, int num_channels, void *userdata)
     // Render SFX on top (adds to buffer)
     pz_game_sfx_render(g_app.game_sfx, buffer, num_frames, num_channels);
 }
+
+// ============================================================================
+// Web hosting API (Emscripten only)
+// ============================================================================
+
+#ifdef __EMSCRIPTEN__
+
+// Start hosting a game with the specified map
+// Returns 1 on success, 0 on failure
+EMSCRIPTEN_KEEPALIVE int
+pz_web_start_host(const char *map_path)
+{
+    if (!map_path || map_path[0] == '\0') {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET, "web_start_host: no map path");
+        return 0;
+    }
+
+    // Already hosting or joining?
+    if (g_app.net_is_host || g_app.net_is_client) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "web_start_host: already in network session");
+        return 0;
+    }
+
+    // Load the map first
+    if (!map_session_load(&g_app.session, map_path)) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "web_start_host: failed to load map '%s'", map_path);
+        return 0;
+    }
+
+    // Set up WebRTC
+    const char *ice_servers[]
+        = { "stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478" };
+    pz_net_webrtc_config net_config = {
+        .ice_servers = ice_servers,
+        .ice_server_count = (int)(sizeof(ice_servers) / sizeof(ice_servers[0])),
+        .enable_logging = true,
+    };
+
+    g_app.net_webrtc = pz_net_webrtc_create(&net_config);
+    if (!g_app.net_webrtc) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "web_start_host: failed to create WebRTC");
+        return 0;
+    }
+
+    pz_net_webrtc_set_message_callback(
+        g_app.net_webrtc, net_handle_message, NULL);
+    pz_net_webrtc_set_channel_callback(
+        g_app.net_webrtc, net_handle_channel_state, NULL);
+
+    char *offer_sdp = pz_net_webrtc_create_offer(g_app.net_webrtc, 10000);
+    if (!offer_sdp) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "web_start_host: failed to create offer");
+        pz_net_webrtc_destroy(g_app.net_webrtc);
+        g_app.net_webrtc = NULL;
+        return 0;
+    }
+
+    pz_net_offer *offer
+        = pz_net_offer_create(1, "host", g_app.session.map_path, offer_sdp);
+    char *offer_json = pz_net_offer_encode_json(offer);
+    pz_net_offer_free(offer);
+    pz_free(offer_sdp);
+
+    if (!offer_json) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "web_start_host: failed to encode offer");
+        pz_net_webrtc_destroy(g_app.net_webrtc);
+        g_app.net_webrtc = NULL;
+        return 0;
+    }
+
+    // Generate room code and publish
+    const char *room = pz_signaling_generate_room();
+    strncpy(g_app.net_room_code, room, sizeof(g_app.net_room_code) - 1);
+    g_app.net_room_code[sizeof(g_app.net_room_code) - 1] = '\0';
+    g_app.net_waiting_for_answer = true;
+    g_app.net_is_host = true;
+    g_app.net_use_signaling = true;
+
+    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Web host: room code %s",
+        g_app.net_room_code);
+    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
+        "Web host: offer len=%zu, first100='%.100s'", strlen(offer_json),
+        offer_json);
+
+    pz_signaling_publish(g_app.net_room_code, "o", offer_json,
+        net_signaling_publish_offer_done, NULL);
+    pz_signaling_fetch(
+        g_app.net_room_code, "a", net_signaling_answer_received, NULL);
+    pz_free(offer_json);
+
+    // Reload map to set up networking (create net_remote_tank)
+    // Note: must copy path first since map_session_unload clears it
+    char reload_path[256];
+    strncpy(reload_path, g_app.session.map_path, sizeof(reload_path) - 1);
+    reload_path[sizeof(reload_path) - 1] = '\0';
+    map_session_load(&g_app.session, reload_path);
+
+    g_app.state = GAME_STATE_PLAYING;
+    g_app.state_timer = 0.0f;
+
+    return 1;
+}
+
+// Get the current room code (returns empty string if not hosting)
+EMSCRIPTEN_KEEPALIVE const char *
+pz_web_get_room_code(void)
+{
+    return g_app.net_room_code;
+}
+
+// Check if currently hosting
+EMSCRIPTEN_KEEPALIVE int
+pz_web_is_hosting(void)
+{
+    return g_app.net_is_host ? 1 : 0;
+}
+
+// Check if peer is connected
+EMSCRIPTEN_KEEPALIVE int
+pz_web_is_peer_connected(void)
+{
+    return (g_app.net_is_host || g_app.net_is_client) && g_app.net_webrtc
+            && atomic_load(&g_app.net_channel_open)
+        ? 1
+        : 0;
+}
+
+#endif // __EMSCRIPTEN__
 
 sapp_desc
 sokol_main(int argc, char *argv[])
