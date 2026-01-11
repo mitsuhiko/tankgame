@@ -689,8 +689,7 @@ net_signaling_offer_received(const char *message, void *user_data)
 {
     (void)user_data;
     if (!message) {
-        pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET,
-            "Signaling offer fetch failed, retrying");
+        // Silently retry - this happens during normal polling
         if (g_app.net_waiting_for_offer && g_app.net_room_code[0] != '\0') {
             pz_signaling_fetch(
                 g_app.net_room_code, "o", net_signaling_offer_received, NULL);

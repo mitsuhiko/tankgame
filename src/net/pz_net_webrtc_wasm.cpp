@@ -59,8 +59,35 @@ pz_net_webrtc_wait_for_description(pz_net_webrtc *net, uint32_t timeout_ms)
 {
     uint64_t start = pz_time_now_ms();
 
+    // Minimum wait time to allow ICE candidates to be gathered
+    // Chrome doesn't reliably transition to "complete" state with STUN servers
+    const uint32_t min_wait_ms = 3000;
+
     while (!(net->local_description_ready && net->gathering_complete)) {
-        if (timeout_ms > 0 && (pz_time_now_ms() - start) > timeout_ms) {
+        uint64_t elapsed = pz_time_now_ms() - start;
+
+        // After minimum wait, check if we have description with candidates
+        // Use localDescription() to get the current SDP with candidates
+        // (Chrome doesn't reliably transition to "complete" state with STUN)
+        if (elapsed >= min_wait_ms && net->pc) {
+            auto desc = net->pc->localDescription();
+            if (desc) {
+                std::string sdp = std::string(*desc);
+                bool has_candidates = sdp.find("candidate:") != std::string::npos;
+
+                if (has_candidates) {
+                    // Update the cached description and return
+                    net->local_description = sdp;
+                    net->local_description_ready = true;
+                    PZ_LOG_DEBUG(PZ_LOG_CAT_NET,
+                        "ICE gathering in progress but have candidates, "
+                        "proceeding after %ums", (unsigned)elapsed);
+                    return true;
+                }
+            }
+        }
+
+        if (timeout_ms > 0 && elapsed > timeout_ms) {
             return false;
         }
         pz_time_sleep_ms(10);

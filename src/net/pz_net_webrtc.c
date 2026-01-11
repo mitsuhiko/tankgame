@@ -25,6 +25,9 @@ typedef struct pz_net_webrtc {
 
 static bool g_pz_net_webrtc_logger_initialized = false;
 
+// Forward declarations
+static char *pz_net_webrtc_get_local_description(pz_net_webrtc *net);
+
 static void RTC_API
 pz_net_webrtc_log_callback(rtcLogLevel level, const char *message)
 {
@@ -152,8 +155,26 @@ pz_net_webrtc_wait_for_gathering(pz_net_webrtc *net, uint32_t timeout_ms)
 {
     uint64_t start = pz_time_now_ms();
 
+    // Minimum wait time to allow ICE candidates to be gathered
+    // Chrome/browsers don't reliably transition to "complete" state with STUN
+    const uint32_t min_wait_ms = 2000;
+
     while (!net->gathering_complete) {
-        if (timeout_ms > 0 && (pz_time_now_ms() - start) > timeout_ms) {
+        uint64_t elapsed = pz_time_now_ms() - start;
+
+        // After minimum wait, check if we have candidates and proceed
+        if (elapsed >= min_wait_ms) {
+            char *desc = pz_net_webrtc_get_local_description(net);
+            if (desc) {
+                bool has_candidates = strstr(desc, "candidate:") != NULL;
+                pz_free(desc);
+                if (has_candidates) {
+                    return true;
+                }
+            }
+        }
+
+        if (timeout_ms > 0 && elapsed > timeout_ms) {
             return false;
         }
         pz_time_sleep_ms(10);
