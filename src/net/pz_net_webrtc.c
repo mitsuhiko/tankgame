@@ -123,6 +123,7 @@ pz_net_webrtc_attach_data_channel(pz_net_webrtc *net, int dc)
         return;
 
     net->dc = dc;
+    rtcSetUserPointer(net->dc, net);
     rtcSetOpenCallback(net->dc, pz_net_webrtc_on_channel_open);
     rtcSetClosedCallback(net->dc, pz_net_webrtc_on_channel_closed);
     rtcSetMessageCallback(net->dc, pz_net_webrtc_on_channel_message);
@@ -392,8 +393,19 @@ pz_net_webrtc_set_channel_callback(pz_net_webrtc *net,
 bool
 pz_net_webrtc_send(pz_net_webrtc *net, const uint8_t *data, size_t len)
 {
-    if (!net || net->dc < 0 || !net->channel_open || !data || len == 0)
+    if (!net || net->dc < 0 || !data || len == 0)
         return false;
+
+    if (!net->channel_open) {
+        if (rtcIsOpen(net->dc)) {
+            net->channel_open = true;
+            if (net->channel_callback) {
+                net->channel_callback(true, net->callback_user_data);
+            }
+        } else {
+            return false;
+        }
+    }
 
     int rc = rtcSendMessage(net->dc, (const char *)data, (int)len);
     if (rc < 0) {

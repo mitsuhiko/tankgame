@@ -190,6 +190,81 @@ frames 10          # Stopped
 | `screenshot <path>` | Save screenshot to file |
 | `dump <path>` | Dump game state to text file |
 
+### File Operations
+
+| Command | Description |
+|---------|-------------|
+| `wait_file <path> [timeout]` | Wait for a file to exist (polling every 100ms). Timeout in seconds, default 30. |
+| `delete_file <path>` | Delete a file (no error if not found) |
+| `log <message>` | Print a message to the log |
+
+### Network Testing
+
+These commands enable debugging WebRTC multiplayer networking between two game instances.
+
+| Command | Description |
+|---------|-------------|
+| `net_host <offer_file>` | Create WebRTC offer, write URL to file |
+| `net_join <offer_file> <answer_file>` | Read offer from file, create answer, write to file |
+| `net_answer <answer_file>` | Read answer from file and apply (host only) |
+| `net_wait [timeout]` | Wait for data channel connection. Timeout in seconds, default 30. |
+
+**Multiplayer testing workflow:**
+
+Run two game instances, each with a debug script:
+
+**Host script (`scripts/net_host.dbgscript`):**
+```
+# Clean up old files
+delete_file debug-temp/offer.txt
+delete_file debug-temp/answer.txt
+
+# Create offer and write to file
+net_host debug-temp/offer.txt
+log "Offer written, waiting for answer..."
+
+# Wait for client to write answer
+wait_file debug-temp/answer.txt 30
+
+# Apply the answer
+net_answer debug-temp/answer.txt
+
+# Wait for connection
+net_wait 30
+log "Connected!"
+
+frames 60
+screenshot debug-temp/host_connected.png
+quit
+```
+
+**Client script (`scripts/net_client.dbgscript`):**
+```
+# Wait for host's offer
+wait_file debug-temp/offer.txt 30
+log "Found offer, joining..."
+
+# Read offer, create answer
+net_join debug-temp/offer.txt debug-temp/answer.txt
+
+# Wait for connection
+net_wait 30
+log "Connected!"
+
+frames 60
+screenshot debug-temp/client_connected.png
+quit
+```
+
+**Running both:**
+```bash
+# Terminal 1 - Host
+./build/tankgame --debug-script-file scripts/net_host.dbgscript
+
+# Terminal 2 - Client (start within 30 seconds of host)
+./build/tankgame --debug-script-file scripts/net_client.dbgscript
+```
+
 ## Examples
 
 ### Basic Screenshot Test

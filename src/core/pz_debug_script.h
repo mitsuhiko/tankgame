@@ -89,6 +89,11 @@ typedef enum {
     PZ_DEBUG_SCRIPT_MOUSE_SCREEN,
     PZ_DEBUG_SCRIPT_SPAWN_BARRIER,
     PZ_DEBUG_SCRIPT_SPAWN_POWERUP,
+    PZ_DEBUG_SCRIPT_NET_HOST, // Create WebRTC offer, write to file
+    PZ_DEBUG_SCRIPT_NET_JOIN, // Read offer, create answer, write to file
+    PZ_DEBUG_SCRIPT_NET_ANSWER, // Read answer and apply
+    PZ_DEBUG_SCRIPT_NET_WAIT, // Wait for connection
+    PZ_DEBUG_SCRIPT_WAITING, // Script is waiting (for file or connection)
 } pz_debug_script_action;
 
 // Advance script state by one frame
@@ -137,5 +142,25 @@ bool pz_debug_script_blocks_input(const pz_debug_script *script);
 void pz_debug_script_dump_state(const char *path, pz_tank_manager *tank_mgr,
     pz_projectile_manager *proj_mgr, pz_ai_manager *ai_mgr,
     const pz_toxic_cloud *toxic_cloud, pz_tank *player, int frame_count);
+
+// Get offer file path for NET_HOST action
+const char *pz_debug_script_get_net_offer_path(const pz_debug_script *script);
+
+// Get offer and answer file paths for NET_JOIN action
+void pz_debug_script_get_net_join_paths(const pz_debug_script *script,
+    const char **offer_path, const char **answer_path);
+
+// Get answer file path for NET_ANSWER action
+const char *pz_debug_script_get_net_answer_path(const pz_debug_script *script);
+
+// Get timeout for NET_WAIT action (in seconds, 0 = no timeout)
+float pz_debug_script_get_net_wait_timeout(const pz_debug_script *script);
+
+// Notify script that connection is established (call when data channel opens)
+void pz_debug_script_notify_connected(pz_debug_script *script);
+
+// Notify script that a file was written (call after
+// NET_HOST/NET_JOIN/NET_ANSWER)
+void pz_debug_script_notify_action_complete(pz_debug_script *script);
 
 #endif // PZ_DEBUG_SCRIPT_H

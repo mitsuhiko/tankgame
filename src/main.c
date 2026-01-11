@@ -286,6 +286,8 @@ typedef struct app_state {
     uint32_t net_last_sent_tick;
     net_input_queue net_rx_queue;
     net_input_slot net_remote_inputs[NET_REMOTE_INPUT_BUFFER];
+    pz_tank_input net_last_remote_input;
+    bool net_has_remote_input;
     pz_tank *net_remote_tank;
     pz_net_offer *join_offer;
     char *join_answer;
@@ -453,6 +455,8 @@ net_drain_incoming_inputs(void)
         input.target_turret = packet.turret;
         input.fire = packet.fire != 0;
         net_store_remote_input(packet.tick, &input);
+        g_app.net_last_remote_input = input;
+        g_app.net_has_remote_input = true;
     }
 }
 
@@ -463,6 +467,10 @@ net_handle_channel_state(bool open, void *user_data)
     atomic_store(&g_app.net_channel_open, open);
     if (open) {
         pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Data channel open");
+        // Notify debug script that connection is established
+        if (g_app.debug_script) {
+            pz_debug_script_notify_connected(g_app.debug_script);
+        }
     } else {
         pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Data channel closed");
     }
@@ -473,6 +481,8 @@ net_handle_message(const uint8_t *data, size_t len, void *user_data)
 {
     (void)user_data;
     if (!data || len != sizeof(net_input_packet)) {
+        pz_log(PZ_LOG_DEBUG, PZ_LOG_CAT_NET,
+            "Unexpected input packet size: %zu", len);
         return;
     }
 
@@ -658,6 +668,8 @@ map_session_load(map_session *session, const char *map_path)
 
     net_remote_inputs_reset(g_app.net_remote_inputs, NET_REMOTE_INPUT_BUFFER);
     g_app.net_last_sent_tick = UINT32_MAX;
+    g_app.net_has_remote_input = false;
+    g_app.net_last_remote_input = (pz_tank_input) { 0 };
 
     // Store path for hot-reload
     strncpy(session->map_path, map_path, sizeof(session->map_path) - 1);
@@ -758,21 +770,36 @@ map_session_load(map_session *session, const char *map_path)
             player_spawn_pos = sp->pos;
         }
     }
-    session->player_tank = pz_tank_spawn(session->tank_mgr, player_spawn_pos,
-        (pz_vec4) { 0.2f, 0.4f, 0.9f, 1.0f }, true);
+
+    pz_vec2 remote_spawn_pos
+        = { player_spawn_pos.x + 2.0f, player_spawn_pos.y + 2.0f };
+    if (spawn_count > 1) {
+        const pz_spawn_point *sp = pz_map_get_spawn(session->map, 1);
+        if (sp) {
+            remote_spawn_pos = sp->pos;
+        }
+    }
 
     g_app.net_remote_tank = NULL;
     if (net_active) {
-        pz_vec2 remote_spawn_pos
-            = { player_spawn_pos.x + 2.0f, player_spawn_pos.y + 2.0f };
-        if (spawn_count > 1) {
-            const pz_spawn_point *sp = pz_map_get_spawn(session->map, 1);
-            if (sp) {
-                remote_spawn_pos = sp->pos;
-            }
-        }
-        g_app.net_remote_tank = pz_tank_spawn(session->tank_mgr,
-            remote_spawn_pos, (pz_vec4) { 0.9f, 0.3f, 0.2f, 1.0f }, true);
+        bool local_is_first = g_app.net_is_host;
+        pz_vec2 local_spawn
+            = local_is_first ? player_spawn_pos : remote_spawn_pos;
+        pz_vec2 net_spawn
+            = local_is_first ? remote_spawn_pos : player_spawn_pos;
+
+        pz_vec4 host_color = { 0.2f, 0.4f, 0.9f, 1.0f };
+        pz_vec4 client_color = { 0.9f, 0.3f, 0.2f, 1.0f };
+        pz_vec4 local_color = g_app.net_is_host ? host_color : client_color;
+        pz_vec4 remote_color = g_app.net_is_host ? client_color : host_color;
+
+        session->player_tank
+            = pz_tank_spawn(session->tank_mgr, local_spawn, local_color, true);
+        g_app.net_remote_tank
+            = pz_tank_spawn(session->tank_mgr, net_spawn, remote_color, true);
+    } else {
+        session->player_tank = pz_tank_spawn(session->tank_mgr,
+            player_spawn_pos, (pz_vec4) { 0.2f, 0.4f, 0.9f, 1.0f }, true);
     }
 
     // Create AI manager and spawn enemies
@@ -1163,6 +1190,7 @@ parse_args(int argc, char *argv[])
     g_app.net_is_client = false;
     g_app.net_answer_payload_arg = NULL;
     g_app.net_last_sent_tick = UINT32_MAX;
+    g_app.net_has_remote_input = false;
     g_app.net_remote_tank = NULL;
     g_app.join_offer = NULL;
     g_app.join_answer = NULL;
@@ -1318,6 +1346,8 @@ app_init(void)
     net_remote_inputs_reset(g_app.net_remote_inputs, NET_REMOTE_INPUT_BUFFER);
     atomic_store(&g_app.net_channel_open, false);
     g_app.net_last_sent_tick = UINT32_MAX;
+    g_app.net_has_remote_input = false;
+    g_app.net_last_remote_input = (pz_tank_input) { 0 };
 
     if (g_app.join_payload_arg) {
         g_app.join_offer = pz_net_offer_decode_url(g_app.join_payload_arg);
@@ -2080,6 +2110,126 @@ app_frame(void)
                 break;
             }
 
+            case PZ_DEBUG_SCRIPT_NET_HOST: {
+                const char *offer_path
+                    = pz_debug_script_get_net_offer_path(g_app.debug_script);
+                if (offer_path && !g_app.net_webrtc) {
+                    // Initialize WebRTC as host
+                    pz_net_webrtc_config net_config = {
+                        .ice_servers = NULL,
+                        .ice_server_count = 0,
+                        .enable_logging = true,
+                    };
+                    g_app.net_webrtc = pz_net_webrtc_create(&net_config);
+                    if (g_app.net_webrtc) {
+                        pz_net_webrtc_set_message_callback(
+                            g_app.net_webrtc, net_handle_message, NULL);
+                        pz_net_webrtc_set_channel_callback(
+                            g_app.net_webrtc, net_handle_channel_state, NULL);
+                        char *offer_sdp = pz_net_webrtc_create_offer(
+                            g_app.net_webrtc, 10000);
+                        if (offer_sdp) {
+                            pz_net_offer *offer = pz_net_offer_create(1, "host",
+                                g_app.session.map_path ? g_app.session.map_path
+                                                       : "",
+                                offer_sdp);
+                            char *offer_url = pz_net_offer_encode_url(offer);
+                            pz_net_offer_free(offer);
+                            pz_free(offer_sdp);
+                            if (offer_url) {
+                                pz_file_write_text(offer_path, offer_url);
+                                pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
+                                    "Debug: wrote offer to '%s'", offer_path);
+                                pz_free(offer_url);
+                                g_app.net_is_host = true;
+                            }
+                        }
+                    }
+                }
+                pz_debug_script_notify_action_complete(g_app.debug_script);
+                break;
+            }
+
+            case PZ_DEBUG_SCRIPT_NET_JOIN: {
+                const char *offer_path = NULL;
+                const char *answer_path = NULL;
+                pz_debug_script_get_net_join_paths(
+                    g_app.debug_script, &offer_path, &answer_path);
+                if (offer_path && answer_path && !g_app.net_webrtc) {
+                    char *offer_url = pz_file_read_text(offer_path);
+                    if (offer_url) {
+                        pz_net_offer *offer
+                            = pz_net_offer_decode_url(offer_url);
+                        pz_free(offer_url);
+                        if (offer) {
+                            pz_net_webrtc_config net_config = {
+                                .ice_servers = NULL,
+                                .ice_server_count = 0,
+                                .enable_logging = true,
+                            };
+                            g_app.net_webrtc
+                                = pz_net_webrtc_create(&net_config);
+                            if (g_app.net_webrtc) {
+                                pz_net_webrtc_set_message_callback(
+                                    g_app.net_webrtc, net_handle_message, NULL);
+                                pz_net_webrtc_set_channel_callback(
+                                    g_app.net_webrtc, net_handle_channel_state,
+                                    NULL);
+                                if (pz_net_webrtc_set_remote_offer(
+                                        g_app.net_webrtc, offer->sdp)) {
+                                    char *answer_sdp
+                                        = pz_net_webrtc_create_answer(
+                                            g_app.net_webrtc, 10000);
+                                    if (answer_sdp) {
+                                        pz_net_offer *answer
+                                            = pz_net_offer_create(1, "client",
+                                                offer->map_name, answer_sdp);
+                                        char *answer_url
+                                            = pz_net_offer_encode_url(answer);
+                                        pz_net_offer_free(answer);
+                                        pz_free(answer_sdp);
+                                        if (answer_url) {
+                                            pz_file_write_text(
+                                                answer_path, answer_url);
+                                            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
+                                                "Debug: wrote answer to '%s'",
+                                                answer_path);
+                                            pz_free(answer_url);
+                                            g_app.net_is_client = true;
+                                        }
+                                    }
+                                }
+                            }
+                            pz_net_offer_free(offer);
+                        }
+                    }
+                }
+                pz_debug_script_notify_action_complete(g_app.debug_script);
+                break;
+            }
+
+            case PZ_DEBUG_SCRIPT_NET_ANSWER: {
+                const char *answer_path
+                    = pz_debug_script_get_net_answer_path(g_app.debug_script);
+                if (answer_path && g_app.net_webrtc && g_app.net_is_host) {
+                    char *answer_url = pz_file_read_text(answer_path);
+                    if (answer_url) {
+                        net_apply_answer_payload(answer_url);
+                        pz_free(answer_url);
+                    }
+                }
+                pz_debug_script_notify_action_complete(g_app.debug_script);
+                break;
+            }
+
+            case PZ_DEBUG_SCRIPT_NET_WAIT:
+                // Just continue - the script will poll for connection
+                goto done_script_commands;
+
+            case PZ_DEBUG_SCRIPT_WAITING:
+                // Script is waiting for something, stop processing
+                goto done_script_commands;
+
             default:
                 break;
             }
@@ -2140,13 +2290,11 @@ done_script_commands:;
             net_drain_incoming_inputs();
         }
 
+        bool net_channel_open
+            = net_active && atomic_load(&g_app.net_channel_open);
+
         // Determine number of simulation ticks to run this frame
         sim_ticks = script_turbo ? 1 : pz_sim_accumulate(g_app.sim, frame_dt);
-
-        if (net_active && !atomic_load(&g_app.net_channel_open)) {
-            g_app.sim->accumulator += (double)sim_ticks * PZ_SIM_DT;
-            sim_ticks = 0;
-        }
 
         // Gather input (once per frame)
         pz_tank_input player_input = { 0 };
@@ -2232,15 +2380,16 @@ done_script_commands:;
             uint32_t sim_tick = (uint32_t)pz_sim_tick(g_app.sim);
             pz_tank_input remote_input = { 0 };
             if (net_active && g_app.net_remote_tank) {
-                if (g_app.net_last_sent_tick != sim_tick) {
+                if (net_channel_open && g_app.net_last_sent_tick != sim_tick) {
                     net_send_input(sim_tick, &player_input);
                     g_app.net_last_sent_tick = sim_tick;
                 }
 
-                if (!net_consume_remote_input(sim_tick, &remote_input)) {
-                    int pending_ticks = sim_ticks - tick;
-                    g_app.sim->accumulator += (double)pending_ticks * PZ_SIM_DT;
-                    break;
+                if (net_channel_open
+                    && !net_consume_remote_input(sim_tick, &remote_input)) {
+                    if (g_app.net_has_remote_input) {
+                        remote_input = g_app.net_last_remote_input;
+                    }
                 }
             }
 

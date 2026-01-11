@@ -41,6 +41,13 @@ typedef enum {
     CMD_SPAWN_BARRIER,
     CMD_SPAWN_POWERUP,
     CMD_MOUSE_CLICK,
+    CMD_WAIT_FILE,
+    CMD_NET_HOST,
+    CMD_NET_JOIN,
+    CMD_NET_ANSWER,
+    CMD_NET_WAIT,
+    CMD_LOG,
+    CMD_DELETE_FILE,
 } script_cmd_type;
 
 // Parsed command
@@ -66,8 +73,34 @@ typedef struct {
             char type[64];
         } spawn_powerup_val; // spawn_powerup
         int mouse_button; // 0=left, 1=right, 2=middle
+        struct {
+            char path[256];
+            float timeout_sec; // 0 = no timeout
+        } wait_file_val; // wait_file, net_wait
+        struct {
+            char offer_path[256];
+        } net_host_val; // net_host
+        struct {
+            char offer_path[256];
+            char answer_path[256];
+        } net_join_val; // net_join
+        struct {
+            char answer_path[256];
+        } net_answer_val; // net_answer
+        struct {
+            float timeout_sec;
+        } net_wait_val; // net_wait
+        char log_msg[256]; // log
     };
 } script_cmd;
+
+// Wait state for blocking operations
+typedef enum {
+    WAIT_NONE,
+    WAIT_FILE,
+    WAIT_NET_CONNECTED,
+    WAIT_ACTION_COMPLETE, // waiting for main.c to complete an action
+} wait_state;
 
 // Script context
 struct pz_debug_script {
@@ -88,11 +121,20 @@ struct pz_debug_script {
 
     // Action data (for returning to caller)
     char action_path[256];
+    char action_path2[256]; // second path for net_join
     uint32_t action_seed;
     bool action_god_mode;
     float action_x, action_y;
     char action_item[64];
     char action_powerup_type[64];
+    float action_timeout;
+
+    // Wait state
+    wait_state waiting;
+    char wait_path[256];
+    float wait_timeout_sec;
+    uint64_t wait_start_ms;
+    bool net_connected; // set by notify_connected
 };
 
 // Parse a single line into a command
@@ -242,6 +284,42 @@ parse_command(const char *line, script_cmd *cmd)
         } else {
             cmd->mouse_button = 0; // default: left
         }
+    } else if (strcmp(keyword, "wait_file") == 0) {
+        cmd->type = CMD_WAIT_FILE;
+        strncpy(
+            cmd->wait_file_val.path, arg1, sizeof(cmd->wait_file_val.path) - 1);
+        cmd->wait_file_val.timeout_sec
+            = arg2[0] ? (float)atof(arg2) : 30.0f; // default 30s
+    } else if (strcmp(keyword, "net_host") == 0) {
+        cmd->type = CMD_NET_HOST;
+        strncpy(cmd->net_host_val.offer_path, arg1,
+            sizeof(cmd->net_host_val.offer_path) - 1);
+    } else if (strcmp(keyword, "net_join") == 0) {
+        cmd->type = CMD_NET_JOIN;
+        strncpy(cmd->net_join_val.offer_path, arg1,
+            sizeof(cmd->net_join_val.offer_path) - 1);
+        strncpy(cmd->net_join_val.answer_path, arg2,
+            sizeof(cmd->net_join_val.answer_path) - 1);
+    } else if (strcmp(keyword, "net_answer") == 0) {
+        cmd->type = CMD_NET_ANSWER;
+        strncpy(cmd->net_answer_val.answer_path, arg1,
+            sizeof(cmd->net_answer_val.answer_path) - 1);
+    } else if (strcmp(keyword, "net_wait") == 0) {
+        cmd->type = CMD_NET_WAIT;
+        cmd->net_wait_val.timeout_sec
+            = arg1[0] ? (float)atof(arg1) : 30.0f; // default 30s
+    } else if (strcmp(keyword, "log") == 0) {
+        cmd->type = CMD_LOG;
+        // Get everything after "log " as the message
+        const char *msg = line;
+        while (*msg && !isspace(*msg))
+            msg++; // skip "log"
+        while (*msg && isspace(*msg))
+            msg++; // skip whitespace
+        strncpy(cmd->log_msg, msg, sizeof(cmd->log_msg) - 1);
+    } else if (strcmp(keyword, "delete_file") == 0) {
+        cmd->type = CMD_DELETE_FILE;
+        strncpy(cmd->str_val, arg1, sizeof(cmd->str_val) - 1);
     } else {
         pz_log(PZ_LOG_WARN, PZ_LOG_CAT_CORE,
             "Debug script: unknown command '%s'", keyword);
@@ -457,6 +535,65 @@ pz_debug_script_update(pz_debug_script *script)
     script->input.mouse_click_left = false;
     script->input.mouse_click_right = false;
 
+    // Handle waiting states
+    if (script->waiting != WAIT_NONE) {
+        uint64_t elapsed_ms = pz_time_now_ms() - script->wait_start_ms;
+        float elapsed_sec = (float)elapsed_ms / 1000.0f;
+
+        switch (script->waiting) {
+        case WAIT_FILE: {
+            // Check if file exists
+            if (pz_file_exists(script->wait_path)) {
+                pz_log(PZ_LOG_INFO, PZ_LOG_CAT_CORE,
+                    "Debug script: file '%s' found after %.1fs",
+                    script->wait_path, elapsed_sec);
+                script->waiting = WAIT_NONE;
+                // Continue to process next commands
+                break;
+            }
+            // Check timeout
+            if (script->wait_timeout_sec > 0
+                && elapsed_sec >= script->wait_timeout_sec) {
+                pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_CORE,
+                    "Debug script: wait_file '%s' timed out after %.0fs",
+                    script->wait_path, script->wait_timeout_sec);
+                script->done = true;
+                return PZ_DEBUG_SCRIPT_QUIT;
+            }
+            // Still waiting
+            return PZ_DEBUG_SCRIPT_WAITING;
+        }
+
+        case WAIT_NET_CONNECTED:
+            // Check if connected
+            if (script->net_connected) {
+                pz_log(PZ_LOG_INFO, PZ_LOG_CAT_CORE,
+                    "Debug script: connected after %.1fs", elapsed_sec);
+                script->waiting = WAIT_NONE;
+                // Continue to process next commands
+                break;
+            }
+            // Check timeout
+            if (script->wait_timeout_sec > 0
+                && elapsed_sec >= script->wait_timeout_sec) {
+                pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_CORE,
+                    "Debug script: net_wait timed out after %.0fs",
+                    script->wait_timeout_sec);
+                script->done = true;
+                return PZ_DEBUG_SCRIPT_QUIT;
+            }
+            // Still waiting
+            return PZ_DEBUG_SCRIPT_WAITING;
+
+        case WAIT_ACTION_COMPLETE:
+            // Still waiting for main.c to complete the action
+            return PZ_DEBUG_SCRIPT_WAITING;
+
+        case WAIT_NONE:
+            break;
+        }
+    }
+
     // If we're counting down frames, just continue
     if (script->frames_remaining > 0) {
         script->frames_remaining--;
@@ -645,6 +782,72 @@ pz_debug_script_update(pz_debug_script *script)
                     "Debug script: mouse_click left");
             }
             break;
+
+        case CMD_WAIT_FILE:
+            strncpy(script->wait_path, cmd->wait_file_val.path,
+                sizeof(script->wait_path) - 1);
+            script->wait_timeout_sec = cmd->wait_file_val.timeout_sec;
+            script->wait_start_ms = pz_time_now_ms();
+            script->waiting = WAIT_FILE;
+            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_CORE,
+                "Debug script: waiting for file '%s' (timeout %.0fs)",
+                cmd->wait_file_val.path, cmd->wait_file_val.timeout_sec);
+            return PZ_DEBUG_SCRIPT_WAITING;
+
+        case CMD_NET_HOST:
+            strncpy(script->action_path, cmd->net_host_val.offer_path,
+                sizeof(script->action_path) - 1);
+            script->waiting = WAIT_ACTION_COMPLETE;
+            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_CORE,
+                "Debug script: net_host -> '%s'", cmd->net_host_val.offer_path);
+            return PZ_DEBUG_SCRIPT_NET_HOST;
+
+        case CMD_NET_JOIN:
+            strncpy(script->action_path, cmd->net_join_val.offer_path,
+                sizeof(script->action_path) - 1);
+            strncpy(script->action_path2, cmd->net_join_val.answer_path,
+                sizeof(script->action_path2) - 1);
+            script->waiting = WAIT_ACTION_COMPLETE;
+            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_CORE,
+                "Debug script: net_join '%s' -> '%s'",
+                cmd->net_join_val.offer_path, cmd->net_join_val.answer_path);
+            return PZ_DEBUG_SCRIPT_NET_JOIN;
+
+        case CMD_NET_ANSWER:
+            strncpy(script->action_path, cmd->net_answer_val.answer_path,
+                sizeof(script->action_path) - 1);
+            script->waiting = WAIT_ACTION_COMPLETE;
+            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_CORE,
+                "Debug script: net_answer <- '%s'",
+                cmd->net_answer_val.answer_path);
+            return PZ_DEBUG_SCRIPT_NET_ANSWER;
+
+        case CMD_NET_WAIT:
+            script->action_timeout = cmd->net_wait_val.timeout_sec;
+            script->wait_timeout_sec = cmd->net_wait_val.timeout_sec;
+            script->wait_start_ms = pz_time_now_ms();
+            script->waiting = WAIT_NET_CONNECTED;
+            pz_log(PZ_LOG_INFO, PZ_LOG_CAT_CORE,
+                "Debug script: net_wait (timeout %.0fs)",
+                cmd->net_wait_val.timeout_sec);
+            return PZ_DEBUG_SCRIPT_NET_WAIT;
+
+        case CMD_LOG:
+            pz_log(
+                PZ_LOG_INFO, PZ_LOG_CAT_CORE, "Debug script: %s", cmd->log_msg);
+            break;
+
+        case CMD_DELETE_FILE:
+            if (remove(cmd->str_val) == 0) {
+                pz_log(PZ_LOG_DEBUG, PZ_LOG_CAT_CORE,
+                    "Debug script: deleted '%s'", cmd->str_val);
+            } else {
+                // Not an error if file doesn't exist
+                pz_log(PZ_LOG_DEBUG, PZ_LOG_CAT_CORE,
+                    "Debug script: delete '%s' (already gone or failed)",
+                    cmd->str_val);
+            }
+            break;
         }
     }
 
@@ -745,6 +948,52 @@ pz_debug_script_blocks_input(const pz_debug_script *script)
 {
     // Block physical input when a script is active and not done
     return script && !script->done;
+}
+
+const char *
+pz_debug_script_get_net_offer_path(const pz_debug_script *script)
+{
+    return script ? script->action_path : NULL;
+}
+
+void
+pz_debug_script_get_net_join_paths(const pz_debug_script *script,
+    const char **offer_path, const char **answer_path)
+{
+    if (script) {
+        if (offer_path)
+            *offer_path = script->action_path;
+        if (answer_path)
+            *answer_path = script->action_path2;
+    }
+}
+
+const char *
+pz_debug_script_get_net_answer_path(const pz_debug_script *script)
+{
+    return script ? script->action_path : NULL;
+}
+
+float
+pz_debug_script_get_net_wait_timeout(const pz_debug_script *script)
+{
+    return script ? script->action_timeout : 0.0f;
+}
+
+void
+pz_debug_script_notify_connected(pz_debug_script *script)
+{
+    if (script) {
+        script->net_connected = true;
+    }
+}
+
+void
+pz_debug_script_notify_action_complete(pz_debug_script *script)
+{
+    if (script && script->waiting == WAIT_ACTION_COMPLETE) {
+        script->waiting = WAIT_NONE;
+    }
 }
 
 static const char *
