@@ -6,6 +6,7 @@
 
 #include "../core/pz_mem.h"
 #include "../core/pz_str.h"
+#include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -426,10 +427,41 @@ pz_net_offer_decode_url(const char *url)
     if (!token || *token == '\0')
         return NULL;
 
+    char *trimmed = pz_str_trim(token);
+    if (!trimmed || trimmed[0] == '\0') {
+        pz_free(trimmed);
+        return NULL;
+    }
+
+    size_t trimmed_len = strlen(trimmed);
+    char *clean = pz_alloc(trimmed_len + 1);
+    if (!clean) {
+        pz_free(trimmed);
+        return NULL;
+    }
+
+    size_t clean_len = 0;
+    for (size_t i = 0; i < trimmed_len; i++) {
+        unsigned char c = (unsigned char)trimmed[i];
+        if (!isspace(c)) {
+            clean[clean_len++] = (char)c;
+        }
+    }
+    clean[clean_len] = '\0';
+    pz_free(trimmed);
+
+    if (clean_len == 0) {
+        pz_free(clean);
+        return NULL;
+    }
+
     uint8_t *decoded = NULL;
     size_t decoded_len = 0;
-    if (!pz_net_base64_url_decode(token, &decoded, &decoded_len))
+    if (!pz_net_base64_url_decode(clean, &decoded, &decoded_len)) {
+        pz_free(clean);
         return NULL;
+    }
+    pz_free(clean);
 
     char *json = pz_str_ndup((const char *)decoded, decoded_len);
     pz_free(decoded);

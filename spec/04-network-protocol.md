@@ -26,8 +26,7 @@ We use **WebRTC DataChannels** for all networking:
 | Platform | Library |
 |----------|---------|
 | Desktop (C) | libdatachannel |
-| Browser (WASM) | Native RTCPeerConnection API (default) |
-| Browser (WASM) | libdatachannel via datachannel-wasm (optional) |
+| Browser (WASM) | libdatachannel via datachannel-wasm |
 
 **libdatachannel:** https://github.com/paullouisageneau/libdatachannel
 - Clean C API
@@ -118,6 +117,7 @@ Compressed with zlib/deflate → Base64 URL-safe encoding → ~400-800 chars
 │  3. Set remote description (the offer)                                      │
 │  4. Create SDP answer                                                       │
 │  5. Wait for ICE gathering complete                                         │
+│  6. Send answer payload back to host                                        │
 │  6. Send answer back to host via DataChannel (once connected)               │
 │     OR display answer for manual exchange (fallback)                        │
 │                                                                             │

@@ -13,6 +13,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Memory categories for tracking
 typedef enum {
     PZ_MEM_GENERAL = 0,
@@ -58,5 +62,9 @@ void pz_mem_dump_leaks(void);
 
 // Check if there are any leaks
 bool pz_mem_has_leaks(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PZ_MEM_H

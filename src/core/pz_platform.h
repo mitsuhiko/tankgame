@@ -11,6 +11,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ============================================================================
  * High-Precision Timer
  * ============================================================================
@@ -99,5 +103,9 @@ char *pz_path_dirname(const char *path);
 // Get file extension (caller must pz_free)
 // Returns empty string if no extension
 char *pz_path_extension(const char *path);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PZ_PLATFORM_H

@@ -14,6 +14,10 @@
 
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Log levels
 typedef enum {
     PZ_LOG_TRACE = 0,
@@ -77,5 +81,9 @@ void pz_log(pz_log_level level, pz_log_category cat, const char *fmt, ...)
 #define LOG_INFO(...) PZ_LOG_INFO(PZ_LOG_CAT_CORE, __VA_ARGS__)
 #define LOG_WARN(...) PZ_LOG_WARN(PZ_LOG_CAT_CORE, __VA_ARGS__)
 #define LOG_ERROR(...) PZ_LOG_ERROR(PZ_LOG_CAT_CORE, __VA_ARGS__)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PZ_LOG_H

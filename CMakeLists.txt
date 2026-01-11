@@ -19,7 +19,7 @@ endif()
 set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Dev" "Release")
 
 option(PZ_WEB_BUILD "Build WebAssembly version" OFF)
-option(PZ_ENABLE_WEBRTC "Enable WebRTC networking" OFF)
+set(PZ_ENABLE_WEBRTC ON CACHE BOOL "Enable WebRTC networking" FORCE)
 if(PZ_WEB_BUILD AND NOT EMSCRIPTEN)
     message(FATAL_ERROR "PZ_WEB_BUILD requires the Emscripten toolchain.")
 endif()
@@ -169,6 +169,12 @@ target_include_directories(tankgame PRIVATE
 )
 
 if(PZ_ENABLE_WEBRTC AND NOT EMSCRIPTEN)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/libdatachannel/deps/plog/CMakeLists.txt" OR
+        NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/libdatachannel/deps/usrsctp/CMakeLists.txt" OR
+        NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/libdatachannel/deps/libjuice/CMakeLists.txt")
+        message(FATAL_ERROR
+            "libdatachannel dependencies are missing. Run: git submodule update --init --recursive third_party/libdatachannel")
+    endif()
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(NO_MEDIA ON CACHE BOOL "" FORCE)
     set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)

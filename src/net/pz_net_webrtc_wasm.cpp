@@ -17,11 +17,15 @@
 
 struct pz_net_webrtc {
     std::unique_ptr<rtc::PeerConnection> pc;
-    std::shared_ptr<rtc::DataChannel> offer_channel;
+    std::shared_ptr<rtc::DataChannel> data_channel;
     bool gathering_complete = false;
     bool local_description_ready = false;
+    bool channel_open = false;
     std::string local_description;
     std::string local_type;
+    pz_net_webrtc_message_callback message_callback = nullptr;
+    pz_net_webrtc_channel_callback channel_callback = nullptr;
+    void *callback_user_data = nullptr;
 };
 
 static bool g_pz_net_webrtc_logger_initialized = false;
@@ -76,6 +80,49 @@ pz_net_webrtc_copy_string(const std::string &value)
     return buffer;
 }
 
+static void
+pz_net_webrtc_set_channel_open(pz_net_webrtc *net, bool open)
+{
+    if (!net)
+        return;
+
+    net->channel_open = open;
+    if (net->channel_callback) {
+        net->channel_callback(open, net->callback_user_data);
+    }
+}
+
+static void
+pz_net_webrtc_attach_data_channel(
+    pz_net_webrtc *net, const std::shared_ptr<rtc::DataChannel> &channel)
+{
+    if (!net || !channel)
+        return;
+
+    net->data_channel = channel;
+
+    channel->onOpen([net]() { pz_net_webrtc_set_channel_open(net, true); });
+    channel->onClosed([net]() { pz_net_webrtc_set_channel_open(net, false); });
+    channel->onMessage(
+        [net](rtc::binary data) {
+            if (!net->message_callback)
+                return;
+            net->message_callback(reinterpret_cast<const uint8_t *>(data.data()),
+                data.size(), net->callback_user_data);
+        },
+        [net](rtc::string data) {
+            if (!net->message_callback)
+                return;
+            net->message_callback(
+                reinterpret_cast<const uint8_t *>(data.data()), data.size(),
+                net->callback_user_data);
+        });
+
+    if (channel->isOpen()) {
+        pz_net_webrtc_set_channel_open(net, true);
+    }
+}
+
 pz_net_webrtc *
 pz_net_webrtc_create(const pz_net_webrtc_config *config)
 {
@@ -115,6 +162,11 @@ pz_net_webrtc_create(const pz_net_webrtc_config *config)
         net_ptr->local_description_ready = true;
     });
 
+    net->pc->onDataChannel([net_ptr = net.get()](
+                               std::shared_ptr<rtc::DataChannel> channel) {
+        pz_net_webrtc_attach_data_channel(net_ptr, channel);
+    });
+
     return net.release();
 }
 
@@ -124,7 +176,7 @@ pz_net_webrtc_destroy(pz_net_webrtc *net)
     if (!net)
         return;
 
-    net->offer_channel.reset();
+    net->data_channel.reset();
     net->pc.reset();
     pz_free(net);
 }
@@ -140,8 +192,9 @@ pz_net_webrtc_create_offer(pz_net_webrtc *net, uint32_t timeout_ms)
     net->local_description.clear();
     net->local_type.clear();
 
-    if (!net->offer_channel) {
-        net->offer_channel = net->pc->createDataChannel("game");
+    if (!net->data_channel) {
+        auto channel = net->pc->createDataChannel("game");
+        pz_net_webrtc_attach_data_channel(net, channel);
     }
 
     if (!pz_net_webrtc_wait_for_description(net, timeout_ms)) {
@@ -169,6 +222,24 @@ pz_net_webrtc_set_remote_offer(pz_net_webrtc *net, const char *sdp)
     return true;
 }
 
+bool
+pz_net_webrtc_set_remote_answer(pz_net_webrtc *net, const char *sdp)
+{
+    if (!net || !net->pc || !sdp)
+        return false;
+
+    try {
+        rtc::Description description(sdp, "answer");
+        net->pc->setRemoteDescription(description);
+    } catch (const std::exception &ex) {
+        PZ_LOG_ERROR(
+            PZ_LOG_CAT_NET, "Failed to set remote answer: %s", ex.what());
+        return false;
+    }
+
+    return true;
+}
+
 char *
 pz_net_webrtc_create_answer(pz_net_webrtc *net, uint32_t timeout_ms)
 {
@@ -186,4 +257,38 @@ pz_net_webrtc_create_answer(pz_net_webrtc *net, uint32_t timeout_ms)
     }
 
     return pz_net_webrtc_copy_string(net->local_description);
+}
+
+bool
+pz_net_webrtc_set_message_callback(pz_net_webrtc *net,
+    pz_net_webrtc_message_callback callback, void *user_data)
+{
+    if (!net)
+        return false;
+
+    net->message_callback = callback;
+    net->callback_user_data = user_data;
+    return true;
+}
+
+bool
+pz_net_webrtc_set_channel_callback(pz_net_webrtc *net,
+    pz_net_webrtc_channel_callback callback, void *user_data)
+{
+    if (!net)
+        return false;
+
+    net->channel_callback = callback;
+    net->callback_user_data = user_data;
+    return true;
+}
+
+bool
+pz_net_webrtc_send(pz_net_webrtc *net, const uint8_t *data, size_t len)
+{
+    if (!net || !net->data_channel || !net->channel_open || !data || len == 0)
+        return false;
+
+    return net->data_channel->send(
+        reinterpret_cast<const rtc::byte *>(data), len);
 }

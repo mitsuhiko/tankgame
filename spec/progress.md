@@ -118,8 +118,8 @@
 - [ ] M12.4: domination mode
 
 ## Phase 13: Networking Foundation
-- [ ] M13.1: libdatachannel + datachannel-wasm integration (in progress)
-- [ ] M13.2: WebRTC wrapper (in progress)
+- [x] M13.1: libdatachannel + datachannel-wasm integration
+- [x] M13.2: WebRTC wrapper
 - [x] M13.3: offer URL encoding
 
 ## Phase 16: Polish and Game Feel (partial)
