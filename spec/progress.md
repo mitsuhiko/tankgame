@@ -177,3 +177,10 @@
 - [x] P4: AI toxic escape behavior
 - [x] P5: toxic cloud rendering and tank tint
 - [x] P6: toxic_dawn map and polish
+
+## Multiplayer State Replication
+- [x] N1: network protocol (pz_net_protocol.h/c) with snapshot format
+- [x] N2: host-authoritative model (host runs simulation, sends snapshots)
+- [x] N3: client receives snapshots, applies full state (tanks, projectiles, powerups, mines)
+- [ ] N4: sound/particle events over network
+- [ ] N5: client-side prediction for local tank
