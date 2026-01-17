@@ -65,7 +65,8 @@ create_shadow_mesh(void)
 }
 
 static bool
-tank_circle_hits_map(const pz_map *map, pz_vec2 center, float radius)
+tank_circle_hits_map(
+    const pz_map *map, pz_vec2 center, float radius, int8_t floor_level)
 {
     if (!map)
         return false;
@@ -86,7 +87,8 @@ tank_circle_hits_map(const pz_map *map, pz_vec2 center, float radius)
             if (!pz_map_in_bounds(map, tx, ty)) {
                 return true;
             }
-            if (pz_map_get_height(map, tx, ty) == 0) {
+            // Tank can only move on tiles at its floor level
+            if (pz_map_get_height(map, tx, ty) == floor_level) {
                 continue;
             }
 
@@ -108,7 +110,8 @@ tank_circle_hits_map(const pz_map *map, pz_vec2 center, float radius)
 }
 
 static void
-resolve_tank_circle_map(const pz_map *map, pz_vec2 *center, float radius)
+resolve_tank_circle_map(
+    const pz_map *map, pz_vec2 *center, float radius, int8_t floor_level)
 {
     if (!map || !center)
         return;
@@ -150,7 +153,8 @@ resolve_tank_circle_map(const pz_map *map, pz_vec2 *center, float radius)
                 if (!pz_map_in_bounds(map, tx, ty)) {
                     continue;
                 }
-                if (pz_map_get_height(map, tx, ty) == 0) {
+                // Tank can only move on tiles at its floor level
+                if (pz_map_get_height(map, tx, ty) == floor_level) {
                     continue;
                 }
 
@@ -179,8 +183,8 @@ resolve_tank_circle_map(const pz_map *map, pz_vec2 *center, float radius)
 }
 
 static bool
-tank_circle_hits_tanks(
-    pz_tank_manager *mgr, pz_vec2 center, float radius, int exclude_id)
+tank_circle_hits_tanks(pz_tank_manager *mgr, pz_vec2 center, float radius,
+    int exclude_id, int8_t floor_level)
 {
     if (!mgr)
         return false;
@@ -195,6 +199,9 @@ tank_circle_hits_tanks(
         if (tank->flags & PZ_TANK_FLAG_DEAD)
             continue;
         if (tank->id == exclude_id)
+            continue;
+        // Only collide with tanks on the same floor
+        if (tank->floor_level != floor_level)
             continue;
 
         pz_circle other = pz_circle_new(tank->pos, mgr->collision_radius);
@@ -239,6 +246,9 @@ resolve_tank_circle_tanks(
             if (other->flags & PZ_TANK_FLAG_DEAD)
                 continue;
             if (other->id == tank->id)
+                continue;
+            // Only collide with tanks on the same floor
+            if (other->floor_level != tank->floor_level)
                 continue;
 
             pz_circle a = pz_circle_new(*center, radius);
@@ -753,6 +763,9 @@ pz_tank_update(pz_tank_manager *mgr, pz_tank *tank, const pz_tank_input *input,
             tank->jump_timer = 0.0f;
             tank->jump_duration = 0.0f;
 
+            // Update floor level for new position (may have changed floors)
+            pz_tank_update_floor_level(tank, map);
+
             // Set cooldown on landing tile - pad won't reactivate until
             // player leaves this tile
             int land_tile_x = 0, land_tile_y = 0;
@@ -767,7 +780,7 @@ pz_tank_update(pz_tank_manager *mgr, pz_tank *tank, const pz_tank_input *input,
             float r = mgr->collision_radius;
             pz_vec2 pos = tank->pos;
             if (map) {
-                resolve_tank_circle_map(map, &pos, r);
+                resolve_tank_circle_map(map, &pos, r, tank->floor_level);
             }
             resolve_tank_circle_tanks(mgr, tank, &pos, r);
             tank->pos = pos;
@@ -856,10 +869,12 @@ pz_tank_update(pz_tank_manager *mgr, pz_tank *tank, const pz_tank_input *input,
         // Wall + tank collision (separate axis) using circle checks
         float r = mgr->collision_radius;
         pz_vec2 pos = tank->pos;
+        int8_t floor = tank->floor_level;
 
         pz_vec2 test_x = { new_pos.x, pos.y };
-        bool hit_map_x = map && tank_circle_hits_map(map, test_x, r);
-        bool hit_tank_x = tank_circle_hits_tanks(mgr, test_x, r, tank->id);
+        bool hit_map_x = map && tank_circle_hits_map(map, test_x, r, floor);
+        bool hit_tank_x
+            = tank_circle_hits_tanks(mgr, test_x, r, tank->id, floor);
         if (!hit_map_x && !hit_tank_x) {
             pos.x = new_pos.x;
         } else {
@@ -867,8 +882,9 @@ pz_tank_update(pz_tank_manager *mgr, pz_tank *tank, const pz_tank_input *input,
         }
 
         pz_vec2 test_y = { pos.x, new_pos.y };
-        bool hit_map_y = map && tank_circle_hits_map(map, test_y, r);
-        bool hit_tank_y = tank_circle_hits_tanks(mgr, test_y, r, tank->id);
+        bool hit_map_y = map && tank_circle_hits_map(map, test_y, r, floor);
+        bool hit_tank_y
+            = tank_circle_hits_tanks(mgr, test_y, r, tank->id, floor);
         if (!hit_map_y && !hit_tank_y) {
             pos.y = new_pos.y;
         } else {
@@ -876,7 +892,7 @@ pz_tank_update(pz_tank_manager *mgr, pz_tank *tank, const pz_tank_input *input,
         }
 
         if (map) {
-            resolve_tank_circle_map(map, &pos, r);
+            resolve_tank_circle_map(map, &pos, r, floor);
         }
 
         // Resolve tank-tank overlaps
@@ -1104,6 +1120,42 @@ pz_tank_check_collision(
     return NULL;
 }
 
+pz_tank *
+pz_tank_check_collision_on_floor(pz_tank_manager *mgr, pz_vec2 pos,
+    float radius, int exclude_id, int8_t floor_level)
+{
+    if (!mgr)
+        return NULL;
+
+    pz_circle circle = pz_circle_new(pos, radius);
+
+    for (int i = 0; i < PZ_MAX_TANKS; i++) {
+        pz_tank *tank = &mgr->tanks[i];
+
+        // Skip inactive or dead tanks
+        if (!(tank->flags & PZ_TANK_FLAG_ACTIVE))
+            continue;
+        if (tank->flags & PZ_TANK_FLAG_DEAD)
+            continue;
+
+        // Skip excluded tank (projectile owner)
+        if (tank->id == exclude_id)
+            continue;
+
+        // Skip tanks on different floors
+        if (tank->floor_level != floor_level)
+            continue;
+
+        // Circle-circle collision
+        pz_circle other = pz_circle_new(tank->pos, mgr->collision_radius);
+        if (pz_collision_circle_circle(circle, other, NULL, NULL)) {
+            return tank;
+        }
+    }
+
+    return NULL;
+}
+
 void
 pz_tank_respawn(pz_tank *tank)
 {
@@ -1114,6 +1166,7 @@ pz_tank_respawn(pz_tank *tank)
     tank->flags |= PZ_TANK_FLAG_INVULNERABLE;
 
     tank->pos = tank->spawn_pos;
+    tank->floor_level = tank->spawn_floor_level;
     tank->vel = (pz_vec2) { 0.0f, 0.0f };
     tank->health = tank->max_health;
     tank->respawn_timer = 0.0f;
@@ -1639,6 +1692,29 @@ pz_tank_barrel_is_clear(const pz_tank *tank, const pz_map *map)
     }
 
     return true;
+}
+
+void
+pz_tank_update_floor_level(pz_tank *tank, const pz_map *map)
+{
+    if (!tank) {
+        return;
+    }
+
+    if (!map) {
+        tank->floor_level = 0;
+        return;
+    }
+
+    int tx, ty;
+    pz_map_world_to_tile(map, tank->pos, &tx, &ty);
+
+    if (!pz_map_in_bounds(map, tx, ty)) {
+        // Out of bounds - keep current floor level
+        return;
+    }
+
+    tank->floor_level = pz_map_get_height(map, tx, ty);
 }
 
 int

@@ -9,6 +9,7 @@
 #define PZ_PATHFINDING_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "../core/pz_math.h"
 
@@ -35,15 +36,16 @@ typedef struct pz_path {
 
 // Find a path from start to goal on the map.
 // entity_radius: collision radius of the entity (for obstacle inflation)
+// floor_level: current floor level of the entity (for multi-floor maps)
 // Returns a path with waypoints in world coordinates.
 // If no path found, returns a path with valid=false.
-pz_path pz_pathfind(
-    const pz_map *map, pz_vec2 start, pz_vec2 goal, float entity_radius);
+pz_path pz_pathfind(const pz_map *map, pz_vec2 start, pz_vec2 goal,
+    float entity_radius, int8_t floor_level);
 
 // Check if the current path is still valid (no obstacles blocking it).
 // Useful for detecting when to repath.
-bool pz_path_is_valid(
-    const pz_path *path, const pz_map *map, float entity_radius);
+bool pz_path_is_valid(const pz_path *path, const pz_map *map,
+    float entity_radius, int8_t floor_level);
 
 // Check if path has been completed (reached the end).
 bool pz_path_is_complete(const pz_path *path);
@@ -70,7 +72,8 @@ void pz_path_clear(pz_path *path);
 
 // Smooth a path by removing unnecessary waypoints using line-of-sight checks.
 // This creates more natural movement by allowing diagonal shortcuts.
-void pz_path_smooth(pz_path *path, const pz_map *map, float entity_radius);
+void pz_path_smooth(
+    pz_path *path, const pz_map *map, float entity_radius, int8_t floor_level);
 
 // ============================================================================
 // Debug

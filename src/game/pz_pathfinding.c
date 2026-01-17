@@ -191,14 +191,28 @@ grid_index(const pz_astar_grid *grid, int x, int y)
     return y * grid->width + x;
 }
 
+// Check if a position is solid for a given floor level
+// A position is solid if the tile's height doesn't match the floor level
 static bool
-is_position_clear(const pz_map *map, pz_vec2 pos, float radius)
+is_solid_for_floor(const pz_map *map, pz_vec2 pos, int8_t floor_level)
+{
+    int tx, ty;
+    pz_map_world_to_tile(map, pos, &tx, &ty);
+    if (!pz_map_in_bounds(map, tx, ty)) {
+        return true; // Out of bounds is solid
+    }
+    return pz_map_get_height(map, tx, ty) != floor_level;
+}
+
+static bool
+is_position_clear(
+    const pz_map *map, pz_vec2 pos, float radius, int8_t floor_level)
 {
     if (!map) {
         return true;
     }
 
-    if (pz_map_is_solid(map, pos)) {
+    if (is_solid_for_floor(map, pos, floor_level)) {
         return false;
     }
 
@@ -206,30 +220,38 @@ is_position_clear(const pz_map *map, pz_vec2 pos, float radius)
         return true;
     }
 
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x + radius, pos.y })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x + radius, pos.y }, floor_level)) {
         return false;
     }
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x - radius, pos.y })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x - radius, pos.y }, floor_level)) {
         return false;
     }
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x, pos.y + radius })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x, pos.y + radius }, floor_level)) {
         return false;
     }
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x, pos.y - radius })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x, pos.y - radius }, floor_level)) {
         return false;
     }
 
     float diag = radius * 0.707f;
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x + diag, pos.y + diag })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x + diag, pos.y + diag }, floor_level)) {
         return false;
     }
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x + diag, pos.y - diag })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x + diag, pos.y - diag }, floor_level)) {
         return false;
     }
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x - diag, pos.y + diag })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x - diag, pos.y + diag }, floor_level)) {
         return false;
     }
-    if (pz_map_is_solid(map, (pz_vec2) { pos.x - diag, pos.y - diag })) {
+    if (is_solid_for_floor(
+            map, (pz_vec2) { pos.x - diag, pos.y - diag }, floor_level)) {
         return false;
     }
 
@@ -237,13 +259,13 @@ is_position_clear(const pz_map *map, pz_vec2 pos, float radius)
 }
 
 static bool
-segment_has_clearance(
-    const pz_map *map, pz_vec2 start, pz_vec2 end, float radius)
+segment_has_clearance(const pz_map *map, pz_vec2 start, pz_vec2 end,
+    float radius, int8_t floor_level)
 {
     pz_vec2 delta = pz_vec2_sub(end, start);
     float dist = pz_vec2_len(delta);
     if (dist <= 0.001f) {
-        return is_position_clear(map, start, radius);
+        return is_position_clear(map, start, radius, floor_level);
     }
 
     float step = pz_maxf(radius * 0.5f, 0.2f);
@@ -252,7 +274,7 @@ segment_has_clearance(
     pz_vec2 pos = start;
 
     for (int i = 0; i <= steps; i++) {
-        if (!is_position_clear(map, pos, radius)) {
+        if (!is_position_clear(map, pos, radius, floor_level)) {
             return false;
         }
         pos = pz_vec2_add(pos, increment);
@@ -265,13 +287,19 @@ segment_has_clearance(
 // Walkability Check
 // ============================================================================
 
-// Check if a tile is walkable, considering entity radius
-// We need to check not just the tile itself but nearby tiles that the
-// entity's collision circle would touch
+// Check if a tile is walkable for a given floor level, considering entity
+// radius. We need to check not just the tile itself but nearby tiles that the
+// entity's collision circle would touch.
 static bool
-is_tile_walkable(const pz_map *map, int tx, int ty, float entity_radius)
+is_tile_walkable(
+    const pz_map *map, int tx, int ty, float entity_radius, int8_t floor_level)
 {
     if (!pz_map_in_bounds(map, tx, ty)) {
+        return false;
+    }
+
+    // A tile is walkable if its height matches the floor level
+    if (pz_map_get_height(map, tx, ty) != floor_level) {
         return false;
     }
 
@@ -294,27 +322,27 @@ is_tile_walkable(const pz_map *map, int tx, int ty, float entity_radius)
 
         for (int i = 0; i < 4; i++) {
             pz_vec2 check = pz_vec2_add(center, offsets[i]);
-            if (pz_map_is_solid(map, check)) {
+            if (is_solid_for_floor(map, check, floor_level)) {
                 return false;
             }
         }
     }
 
-    return !pz_map_is_solid(map, center);
+    return true;
 }
 
 // Check if we can move diagonally between two tiles
 // This prevents cutting corners through walls
 static bool
 can_move_diagonal(const pz_map *map, int from_x, int from_y, int to_x, int to_y,
-    float entity_radius)
+    float entity_radius, int8_t floor_level)
 {
     // Check that both adjacent cardinal tiles are walkable
     // This prevents corner-cutting
-    if (!is_tile_walkable(map, to_x, from_y, entity_radius)) {
+    if (!is_tile_walkable(map, to_x, from_y, entity_radius, floor_level)) {
         return false;
     }
-    if (!is_tile_walkable(map, from_x, to_y, entity_radius)) {
+    if (!is_tile_walkable(map, from_x, to_y, entity_radius, floor_level)) {
         return false;
     }
     return true;
@@ -383,7 +411,8 @@ reconstruct_path(pz_path *path, const pz_astar_grid *grid, const pz_map *map,
 // ============================================================================
 
 pz_path
-pz_pathfind(const pz_map *map, pz_vec2 start, pz_vec2 goal, float entity_radius)
+pz_pathfind(const pz_map *map, pz_vec2 start, pz_vec2 goal, float entity_radius,
+    int8_t floor_level)
 {
     pz_path result;
     pz_path_clear(&result);
@@ -406,9 +435,9 @@ pz_pathfind(const pz_map *map, pz_vec2 start, pz_vec2 goal, float entity_radius)
         return result;
     }
 
-    // Quick check: is goal reachable?
-    if (!is_tile_walkable(map, goal_tx, goal_ty, entity_radius)) {
-        // Try to find nearest walkable tile to goal
+    // Quick check: is goal reachable on the same floor level?
+    if (!is_tile_walkable(map, goal_tx, goal_ty, entity_radius, floor_level)) {
+        // Try to find nearest walkable tile to goal on the same floor
         bool found = false;
         for (int r = 1; r <= 3 && !found; r++) {
             for (int dy = -r; dy <= r && !found; dy++) {
@@ -416,7 +445,8 @@ pz_pathfind(const pz_map *map, pz_vec2 start, pz_vec2 goal, float entity_radius)
                     if (abs(dx) == r || abs(dy) == r) {
                         int nx = goal_tx + dx;
                         int ny = goal_ty + dy;
-                        if (is_tile_walkable(map, nx, ny, entity_radius)) {
+                        if (is_tile_walkable(
+                                map, nx, ny, entity_radius, floor_level)) {
                             goal_tx = nx;
                             goal_ty = ny;
                             found = true;
@@ -507,16 +537,16 @@ pz_pathfind(const pz_map *map, pz_vec2 start, pz_vec2 goal, float entity_radius)
                 continue;
             }
 
-            // Check walkability
-            if (!is_tile_walkable(map, nx, ny, entity_radius)) {
+            // Check walkability on the same floor level
+            if (!is_tile_walkable(map, nx, ny, entity_radius, floor_level)) {
                 continue;
             }
 
             // For diagonal moves, check corner-cutting
             bool is_diagonal = (d == 1 || d == 3 || d == 5 || d == 7);
             if (is_diagonal) {
-                if (!can_move_diagonal(
-                        map, current.x, current.y, nx, ny, entity_radius)) {
+                if (!can_move_diagonal(map, current.x, current.y, nx, ny,
+                        entity_radius, floor_level)) {
                     continue;
                 }
             }
@@ -572,17 +602,18 @@ pz_pathfind(const pz_map *map, pz_vec2 start, pz_vec2 goal, float entity_radius)
 // ============================================================================
 
 bool
-pz_path_is_valid(const pz_path *path, const pz_map *map, float entity_radius)
+pz_path_is_valid(const pz_path *path, const pz_map *map, float entity_radius,
+    int8_t floor_level)
 {
     if (!path || !path->valid || !map) {
         return false;
     }
 
-    // Check that each waypoint is still walkable
+    // Check that each waypoint is still walkable on the floor level
     for (int i = path->current; i < path->count; i++) {
         int tx, ty;
         pz_map_world_to_tile(map, path->points[i], &tx, &ty);
-        if (!is_tile_walkable(map, tx, ty, entity_radius)) {
+        if (!is_tile_walkable(map, tx, ty, entity_radius, floor_level)) {
             return false;
         }
     }
@@ -669,7 +700,8 @@ pz_path_clear(pz_path *path)
 // ============================================================================
 
 void
-pz_path_smooth(pz_path *path, const pz_map *map, float entity_radius)
+pz_path_smooth(
+    pz_path *path, const pz_map *map, float entity_radius, int8_t floor_level)
 {
     if (!path || !path->valid || path->count <= 2 || !map) {
         return;
@@ -689,7 +721,7 @@ pz_path_smooth(pz_path *path, const pz_map *map, float entity_radius)
 
         for (int i = path->count - 1; i > current + 1; i--) {
             if (segment_has_clearance(map, path->points[current],
-                    path->points[i], entity_radius)) {
+                    path->points[i], entity_radius, floor_level)) {
                 furthest = i;
                 break;
             }

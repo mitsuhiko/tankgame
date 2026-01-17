@@ -56,6 +56,7 @@ typedef struct pz_projectile {
 
     int owner_id; // Who fired this (for friendly fire checks)
     int damage; // Damage on hit
+    int8_t floor_level; // Floor level (for multi-floor collision)
 
     float scale; // Visual scale
     pz_vec4 color; // Projectile color
@@ -87,6 +88,7 @@ typedef struct pz_projectile_config {
     int damage; // Default: 1
     float scale; // Visual scale (1.0 = normal)
     pz_vec4 color; // Projectile color
+    int8_t floor_level; // Floor level for collision (default: 0)
 } pz_projectile_config;
 
 // Default configuration

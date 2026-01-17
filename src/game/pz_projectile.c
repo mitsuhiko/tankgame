@@ -35,6 +35,7 @@ const pz_projectile_config PZ_PROJECTILE_DEFAULT = {
     .damage = 5, // 2 hits to kill (10 HP tank)
     .scale = 1.0f,
     .color = { 1.0f, 0.8f, 0.2f, 1.0f }, // Yellow/orange
+    .floor_level = 0,
 };
 
 /* ============================================================================
@@ -167,6 +168,7 @@ pz_projectile_spawn(pz_projectile_manager *mgr, pz_vec2 pos, pz_vec2 direction,
     proj->bounce_cooldown = 0.0f;
     proj->owner_id = owner_id;
     proj->damage = config->damage;
+    proj->floor_level = config->floor_level;
     proj->scale = config->scale;
     proj->color = config->color;
     proj->fog_timer = 0.0f;
@@ -229,13 +231,15 @@ pz_projectile_update(pz_projectile_manager *mgr, const pz_map *map,
             // Check for tank collision along the path
             // For simplicity, check at the target position
             // (tanks are large enough this works well)
+            // Only collide with tanks on the same floor level
             if (tank_mgr) {
                 int exclude_id = (proj->age < SELF_DAMAGE_GRACE_PERIOD)
                     ? proj->owner_id
                     : -1;
 
-                pz_tank *hit_tank = pz_tank_check_collision(
-                    tank_mgr, target_pos, PROJECTILE_RADIUS, exclude_id);
+                pz_tank *hit_tank
+                    = pz_tank_check_collision_on_floor(tank_mgr, target_pos,
+                        PROJECTILE_RADIUS, exclude_id, proj->floor_level);
 
                 if (hit_tank) {
                     bool killed = pz_tank_apply_damage(

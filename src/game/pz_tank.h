@@ -76,6 +76,7 @@ typedef struct pz_tank {
     pz_vec2 vel; // Velocity
     float body_angle; // Body rotation (radians)
     float turret_angle; // Turret rotation in world space (radians)
+    int8_t floor_level; // Current floor level (height of tile tank is on)
 
     // Jump pad state
     int jump_state; // 0 = none, 1 = countdown, 2 = in-air
@@ -108,6 +109,7 @@ typedef struct pz_tank {
     float respawn_timer; // Countdown when dead
     float invuln_timer; // Invulnerability time remaining
     pz_vec2 spawn_pos; // Where to respawn
+    int8_t spawn_floor_level; // Floor level at spawn point
 
     // Toxic cloud
     float toxic_damage_timer; // Time until next damage tick
@@ -243,6 +245,11 @@ bool pz_tank_apply_damage(pz_tank_manager *mgr, pz_tank *tank, int amount);
 pz_tank *pz_tank_check_collision(
     pz_tank_manager *mgr, pz_vec2 pos, float radius, int exclude_id);
 
+// Check collision only with tanks on a specific floor level
+// Returns the tank that was hit, or NULL
+pz_tank *pz_tank_check_collision_on_floor(pz_tank_manager *mgr, pz_vec2 pos,
+    float radius, int exclude_id, int8_t floor_level);
+
 // Respawn a dead tank at its spawn point
 void pz_tank_respawn(pz_tank *tank);
 
@@ -317,6 +324,10 @@ bool pz_tank_get_fire_solution(const pz_tank *tank, const pz_map *map,
 
 // Returns true if the barrel path from the tank center to the tip is clear
 bool pz_tank_barrel_is_clear(const pz_tank *tank, const pz_map *map);
+
+// Update tank's floor level based on current position and map
+// Call after spawn, respawn, and jump pad landing
+void pz_tank_update_floor_level(pz_tank *tank, const pz_map *map);
 
 // Get count of active (non-dead) tanks
 int pz_tank_count_active(const pz_tank_manager *mgr);

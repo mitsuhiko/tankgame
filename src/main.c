@@ -1344,14 +1344,27 @@ map_session_load(map_session *session, const char *map_path)
 
         session->player_tank
             = pz_tank_spawn(session->tank_mgr, local_spawn, local_color, true);
+        if (session->player_tank) {
+            pz_tank_update_floor_level(session->player_tank, session->map);
+            session->player_tank->spawn_floor_level
+                = session->player_tank->floor_level;
+        }
         g_app.net_remote_tank
             = pz_tank_spawn(session->tank_mgr, net_spawn, remote_color, true);
         if (g_app.net_remote_tank) {
             g_app.net_remote_tank_id = g_app.net_remote_tank->id;
+            pz_tank_update_floor_level(g_app.net_remote_tank, session->map);
+            g_app.net_remote_tank->spawn_floor_level
+                = g_app.net_remote_tank->floor_level;
         }
     } else {
         session->player_tank = pz_tank_spawn(session->tank_mgr,
             player_spawn_pos, (pz_vec4) { 0.2f, 0.4f, 0.9f, 1.0f }, true);
+        if (session->player_tank) {
+            pz_tank_update_floor_level(session->player_tank, session->map);
+            session->player_tank->spawn_floor_level
+                = session->player_tank->floor_level;
+        }
     }
 
     // Create AI manager and spawn enemies
@@ -3140,6 +3153,8 @@ done_script_commands:;
                             .damage = weapon->damage,
                             .scale = weapon->projectile_scale,
                             .color = weapon->projectile_color,
+                            .floor_level
+                            = g_app.session.player_tank->floor_level,
                         };
 
                         int proj_slot = pz_projectile_spawn(
@@ -3226,6 +3241,7 @@ done_script_commands:;
                             .damage = weapon->damage,
                             .scale = weapon->projectile_scale,
                             .color = weapon->projectile_color,
+                            .floor_level = g_app.net_remote_tank->floor_level,
                         };
 
                         int proj_slot = pz_projectile_spawn(
