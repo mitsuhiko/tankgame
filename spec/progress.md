@@ -184,3 +184,13 @@
 - [x] N3: client receives snapshots, applies full state (tanks, projectiles, powerups, mines)
 - [ ] N4: sound/particle events over network
 - [ ] N5: client-side prediction for local tank
+
+## Multi-Floor Support
+- [x] MF1: floor_level tracking for tanks, projectiles, barriers
+- [x] MF2: floor-aware collision (tanks/projectiles only interact on same floor)
+- [x] MF3: floor-aware pathfinding (A* considers floor level)
+- [x] MF4: floor-aware lighting (lights only blocked by occluders at same or higher floor)
+- [x] MF5: barrier floor_level from map tile height
+- [x] MF6: death/hit events carry floor_level for explosion lights
+- [ ] MF7: floor_level for powerups (currently hardcoded to 0)
+- [ ] MF8: floor_level for mines (currently hardcoded to 0)

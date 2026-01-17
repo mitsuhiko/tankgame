@@ -48,6 +48,9 @@ typedef struct pz_barrier {
 
     char tile_name[32]; // Tile name for texture lookup
 
+    // Floor level (for multi-floor support)
+    int8_t floor_level; // Height level this barrier is on
+
     // Ownership (for player-placed barriers)
     int owner_tank_id; // -1 if map-placed, tank ID if player-placed
     pz_vec4 tint_color; // Color tint from owner's tank (1,1,1,1 = no tint)
@@ -95,16 +98,16 @@ void pz_barrier_manager_destroy(pz_barrier_manager *mgr, pz_renderer *renderer);
 
 // Add a barrier at a position
 // Returns barrier index, or -1 if full
-int pz_barrier_add(
-    pz_barrier_manager *mgr, pz_vec2 pos, const char *tile_name, float health);
+int pz_barrier_add(pz_barrier_manager *mgr, pz_vec2 pos, const char *tile_name,
+    float health, int8_t floor_level);
 
 // Add a barrier with owner (for player-placed barriers)
 // owner_tank_id: -1 for map-placed, tank ID for player-placed
 // tint_color: color overlay (1,1,1,1 = no tint)
 // lifetime: time in seconds until barrier auto-destroys (0 = infinite)
 int pz_barrier_add_owned(pz_barrier_manager *mgr, pz_vec2 pos,
-    const char *tile_name, float health, int owner_tank_id, pz_vec4 tint_color,
-    float lifetime);
+    const char *tile_name, float health, int8_t floor_level, int owner_tank_id,
+    pz_vec4 tint_color, float lifetime);
 
 // Update all barriers (destruction timers, etc.)
 // After update, check mgr->expired_count for barriers that expired this frame
@@ -115,27 +118,28 @@ void pz_barrier_update(pz_barrier_manager *mgr, float dt);
 const pz_expired_barrier *pz_barrier_get_expired(
     const pz_barrier_manager *mgr, int *count);
 
-// Apply damage to a barrier at a position
+// Apply damage to a barrier at a position (same floor only)
 // Returns true if a barrier was hit
 // If destroyed is not NULL, sets *destroyed = true if the barrier was destroyed
-bool pz_barrier_apply_damage(
-    pz_barrier_manager *mgr, pz_vec2 pos, float damage, bool *destroyed);
+bool pz_barrier_apply_damage(pz_barrier_manager *mgr, pz_vec2 pos, float damage,
+    int8_t floor_level, bool *destroyed);
 
-// Check if a world position is blocked by a barrier
+// Check if a world position is blocked by a barrier on the same floor
 // Returns the barrier if blocked, NULL otherwise
 pz_barrier *pz_barrier_check_collision(
-    pz_barrier_manager *mgr, pz_vec2 pos, float radius);
+    pz_barrier_manager *mgr, pz_vec2 pos, float radius, int8_t floor_level);
 
-// Resolve tank-barrier collision by pushing the tank out
+// Resolve tank-barrier collision by pushing the tank out (same floor only)
 // Modifies pos in place, returns true if collision occurred
 bool pz_barrier_resolve_collision(
-    pz_barrier_manager *mgr, pz_vec2 *pos, float radius);
+    pz_barrier_manager *mgr, pz_vec2 *pos, float radius, int8_t floor_level);
 
-// Check if a line segment hits a barrier (for projectile raycast)
-// Returns true if hit, fills out hit_pos and hit_normal
-// barrier_out receives the hit barrier (can be NULL if not needed)
+// Check if a line segment hits a barrier on the same floor (for projectile
+// raycast) Returns true if hit, fills out hit_pos and hit_normal barrier_out
+// receives the hit barrier (can be NULL if not needed)
 bool pz_barrier_raycast(pz_barrier_manager *mgr, pz_vec2 start, pz_vec2 end,
-    pz_vec2 *hit_pos, pz_vec2 *hit_normal, pz_barrier **barrier_out);
+    int8_t floor_level, pz_vec2 *hit_pos, pz_vec2 *hit_normal,
+    pz_barrier **barrier_out);
 
 // Add barrier occluders to lighting system
 void pz_barrier_add_occluders(pz_barrier_manager *mgr, pz_lighting *lighting);

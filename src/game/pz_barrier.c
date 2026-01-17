@@ -310,18 +310,18 @@ rebuild_mesh(pz_barrier_manager *mgr, pz_renderer *renderer)
  */
 
 int
-pz_barrier_add(
-    pz_barrier_manager *mgr, pz_vec2 pos, const char *tile_name, float health)
+pz_barrier_add(pz_barrier_manager *mgr, pz_vec2 pos, const char *tile_name,
+    float health, int8_t floor_level)
 {
     // Map-placed barriers have no owner, no tint, and no lifetime
-    return pz_barrier_add_owned(mgr, pos, tile_name, health, -1,
+    return pz_barrier_add_owned(mgr, pos, tile_name, health, floor_level, -1,
         (pz_vec4) { 1.0f, 1.0f, 1.0f, 1.0f }, 0.0f);
 }
 
 int
 pz_barrier_add_owned(pz_barrier_manager *mgr, pz_vec2 pos,
-    const char *tile_name, float health, int owner_tank_id, pz_vec4 tint_color,
-    float lifetime)
+    const char *tile_name, float health, int8_t floor_level, int owner_tank_id,
+    pz_vec4 tint_color, float lifetime)
 {
     if (!mgr || !tile_name)
         return -1;
@@ -347,6 +347,7 @@ pz_barrier_add_owned(pz_barrier_manager *mgr, pz_vec2 pos,
     barrier->pos = pos;
     barrier->health = health;
     barrier->max_health = health;
+    barrier->floor_level = floor_level;
     barrier->destroy_timer = 0.0f;
     barrier->owner_tank_id = owner_tank_id;
     barrier->tint_color = tint_color;
@@ -431,8 +432,8 @@ pz_barrier_get_expired(const pz_barrier_manager *mgr, int *count)
 }
 
 bool
-pz_barrier_apply_damage(
-    pz_barrier_manager *mgr, pz_vec2 pos, float damage, bool *destroyed)
+pz_barrier_apply_damage(pz_barrier_manager *mgr, pz_vec2 pos, float damage,
+    int8_t floor_level, bool *destroyed)
 {
     if (!mgr)
         return false;
@@ -445,6 +446,10 @@ pz_barrier_apply_damage(
     for (int i = 0; i < PZ_MAX_BARRIERS; i++) {
         pz_barrier *barrier = &mgr->barriers[i];
         if (!barrier->active || barrier->destroyed)
+            continue;
+
+        // Only damage barriers on the same floor
+        if (barrier->floor_level != floor_level)
             continue;
 
         // Check if position is within barrier bounds
@@ -478,7 +483,8 @@ pz_barrier_apply_damage(
 }
 
 pz_barrier *
-pz_barrier_check_collision(pz_barrier_manager *mgr, pz_vec2 pos, float radius)
+pz_barrier_check_collision(
+    pz_barrier_manager *mgr, pz_vec2 pos, float radius, int8_t floor_level)
 {
     if (!mgr)
         return NULL;
@@ -489,6 +495,10 @@ pz_barrier_check_collision(pz_barrier_manager *mgr, pz_vec2 pos, float radius)
     for (int i = 0; i < PZ_MAX_BARRIERS; i++) {
         pz_barrier *barrier = &mgr->barriers[i];
         if (!barrier->active || barrier->destroyed)
+            continue;
+
+        // Only check barriers on the same floor
+        if (barrier->floor_level != floor_level)
             continue;
 
         // Box-circle collision
@@ -504,7 +514,7 @@ pz_barrier_check_collision(pz_barrier_manager *mgr, pz_vec2 pos, float radius)
 
 bool
 pz_barrier_resolve_collision(
-    pz_barrier_manager *mgr, pz_vec2 *pos, float radius)
+    pz_barrier_manager *mgr, pz_vec2 *pos, float radius, int8_t floor_level)
 {
     if (!mgr || !pos)
         return false;
@@ -515,6 +525,10 @@ pz_barrier_resolve_collision(
     for (int i = 0; i < PZ_MAX_BARRIERS; i++) {
         pz_barrier *barrier = &mgr->barriers[i];
         if (!barrier->active || barrier->destroyed)
+            continue;
+
+        // Only collide with barriers on the same floor
+        if (barrier->floor_level != floor_level)
             continue;
 
         pz_aabb box
@@ -534,7 +548,8 @@ pz_barrier_resolve_collision(
 
 bool
 pz_barrier_raycast(pz_barrier_manager *mgr, pz_vec2 start, pz_vec2 end,
-    pz_vec2 *hit_pos, pz_vec2 *hit_normal, pz_barrier **barrier_out)
+    int8_t floor_level, pz_vec2 *hit_pos, pz_vec2 *hit_normal,
+    pz_barrier **barrier_out)
 {
     if (!mgr)
         return false;
@@ -552,6 +567,10 @@ pz_barrier_raycast(pz_barrier_manager *mgr, pz_vec2 start, pz_vec2 end,
     for (int i = 0; i < PZ_MAX_BARRIERS; i++) {
         pz_barrier *barrier = &mgr->barriers[i];
         if (!barrier->active || barrier->destroyed)
+            continue;
+
+        // Only raycast against barriers on the same floor
+        if (barrier->floor_level != floor_level)
             continue;
 
         // AABB ray intersection
@@ -650,8 +669,8 @@ pz_barrier_add_occluders(pz_barrier_manager *mgr, pz_lighting *lighting)
         if (!barrier->active || barrier->destroyed)
             continue;
 
-        pz_lighting_add_occluder(
-            lighting, barrier->pos, (pz_vec2) { half, half }, 0.0f);
+        pz_lighting_add_occluder(lighting, barrier->pos,
+            (pz_vec2) { half, half }, 0.0f, barrier->floor_level);
     }
 }
 

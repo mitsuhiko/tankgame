@@ -35,6 +35,7 @@
 // Edge structure for shadow casting
 typedef struct edge {
     pz_vec2 a, b; // Edge endpoints
+    int8_t floor_level; // Floor level of the occluder this edge belongs to
 } edge;
 
 struct pz_lighting {
@@ -121,6 +122,7 @@ add_occluder_edges(pz_lighting *lighting, const pz_occluder *occ)
         edge *e = &lighting->edges[lighting->edge_count++];
         e->a = corners[i];
         e->b = corners[(i + 1) % 4];
+        e->floor_level = occ->floor_level;
     }
 }
 
@@ -433,8 +435,8 @@ pz_lighting_clear_dynamic_occluders(pz_lighting *lighting)
 }
 
 void
-pz_lighting_add_occluder(
-    pz_lighting *lighting, pz_vec2 position, pz_vec2 half_size, float angle)
+pz_lighting_add_occluder(pz_lighting *lighting, pz_vec2 position,
+    pz_vec2 half_size, float angle, int8_t floor_level)
 {
     if (!lighting || lighting->occluder_count >= PZ_MAX_OCCLUDERS) {
         return;
@@ -444,6 +446,7 @@ pz_lighting_add_occluder(
     occ->position = position;
     occ->half_size = half_size;
     occ->angle = angle;
+    occ->floor_level = floor_level;
 
     // Add edges for shadow casting
     add_occluder_edges(lighting, occ);
@@ -467,11 +470,13 @@ pz_lighting_add_map_occluders(pz_lighting *lighting, const pz_map *map)
             int8_t h = pz_map_get_height(map, x, y);
             if (h > 0) {
                 // Wall tile - add as occluder (pits h < 0 don't block light)
+                // Use wall height as floor_level - walls block lights at same
+                // or lower floor level
                 float cx = x * map->tile_size + tile_half - half_w;
                 float cz = y * map->tile_size + tile_half - half_h;
 
                 pz_lighting_add_occluder(lighting, (pz_vec2) { cx, cz },
-                    (pz_vec2) { tile_half, tile_half }, 0.0f);
+                    (pz_vec2) { tile_half, tile_half }, 0.0f, h);
             }
         }
     }
@@ -494,7 +499,7 @@ pz_lighting_clear_lights(pz_lighting *lighting)
 
 int
 pz_lighting_add_point_light(pz_lighting *lighting, pz_vec2 position,
-    pz_vec3 color, float intensity, float radius)
+    pz_vec3 color, float intensity, float radius, int8_t floor_level)
 {
     if (!lighting || lighting->light_count >= PZ_MAX_LIGHTS) {
         return -1;
@@ -512,6 +517,7 @@ pz_lighting_add_point_light(pz_lighting *lighting, pz_vec2 position,
     light->radius = radius;
     light->cone_angle = PZ_PI; // Full circle
     light->cone_softness = 0.0f;
+    light->floor_level = floor_level;
 
     return idx;
 }
@@ -519,7 +525,7 @@ pz_lighting_add_point_light(pz_lighting *lighting, pz_vec2 position,
 int
 pz_lighting_add_spotlight(pz_lighting *lighting, pz_vec2 position,
     float direction, pz_vec3 color, float intensity, float radius,
-    float cone_angle, float cone_softness)
+    float cone_angle, float cone_softness, int8_t floor_level)
 {
     if (!lighting || lighting->light_count >= PZ_MAX_LIGHTS) {
         return -1;
@@ -537,6 +543,7 @@ pz_lighting_add_spotlight(pz_lighting *lighting, pz_vec2 position,
     light->radius = radius;
     light->cone_angle = cone_angle;
     light->cone_softness = cone_softness;
+    light->floor_level = floor_level;
 
     return idx;
 }
@@ -585,12 +592,18 @@ generate_light_geometry(pz_lighting *lighting, const pz_light *light,
     // (This creates crisp shadow edges)
 
     // First pass: collect all interesting angles
+    // Only consider edges from occluders at same or higher floor level
+    // (light at floor N is blocked by walls at floor >= N)
     edge filtered_edges[PZ_MAX_OCCLUDERS * PZ_MAX_EDGES_PER_OCCLUDER];
     int filtered_edge_count = 0;
     float max_dist = light->radius + MIN_RAY_DISTANCE;
     float max_dist_sq = max_dist * max_dist;
 
     for (int i = 0; i < lighting->edge_count; i++) {
+        // Skip edges from lower floors - they don't block this light
+        if (lighting->edges[i].floor_level < light->floor_level) {
+            continue;
+        }
         float dist_sq = point_segment_distance_sq(
             light->position, lighting->edges[i].a, lighting->edges[i].b);
         if (dist_sq <= max_dist_sq) {

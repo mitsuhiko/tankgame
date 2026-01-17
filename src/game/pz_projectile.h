@@ -38,6 +38,7 @@ typedef enum pz_projectile_hit_type {
 typedef struct pz_projectile_hit {
     pz_projectile_hit_type type;
     pz_vec2 pos; // Position of hit
+    int8_t floor_level; // Floor level of the projectile that hit
 } pz_projectile_hit;
 
 // Projectile structure

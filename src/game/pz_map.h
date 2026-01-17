@@ -138,6 +138,7 @@ typedef struct pz_barrier_spawn {
     pz_vec2 pos;
     char tile_name[32]; // Which tile's textures to use (e.g., "cobble")
     float health; // Starting health (default: 20)
+    int8_t floor_level; // Floor level (height of tile barrier is placed on)
 } pz_barrier_spawn;
 
 // Map lighting settings

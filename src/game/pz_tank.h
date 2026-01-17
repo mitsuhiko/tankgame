@@ -30,6 +30,7 @@ typedef struct pz_tank_death_event {
     int tank_id;
     pz_vec2 pos;
     bool is_player;
+    int8_t floor_level; // Floor level where tank died
 } pz_tank_death_event;
 
 // Respawn event - records when a tank respawns

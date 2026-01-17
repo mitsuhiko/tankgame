@@ -106,13 +106,15 @@ pz_projectile_manager_destroy(pz_projectile_manager *mgr, pz_renderer *renderer)
  */
 
 static void
-record_hit(pz_projectile_manager *mgr, pz_projectile_hit_type type, pz_vec2 pos)
+record_hit(pz_projectile_manager *mgr, pz_projectile_hit_type type, pz_vec2 pos,
+    int8_t floor_level)
 {
     if (mgr->hit_count >= PZ_MAX_PROJECTILE_HITS)
         return;
 
     mgr->hits[mgr->hit_count].type = type;
     mgr->hits[mgr->hit_count].pos = pos;
+    mgr->hits[mgr->hit_count].floor_level = floor_level;
     mgr->hit_count++;
 }
 
@@ -251,7 +253,7 @@ pz_projectile_update(pz_projectile_manager *mgr, const pz_map *map,
 
                     record_hit(mgr,
                         killed ? PZ_HIT_TANK : PZ_HIT_TANK_NON_FATAL,
-                        target_pos);
+                        target_pos, proj->floor_level);
 
                     proj->active = false;
                     mgr->active_count--;
@@ -276,7 +278,8 @@ pz_projectile_update(pz_projectile_manager *mgr, const pz_map *map,
 
                     pz_vec2 hit_pos = pz_vec2_scale(
                         pz_vec2_add(target_pos, other->pos), 0.5f);
-                    record_hit(mgr, PZ_HIT_PROJECTILE, hit_pos);
+                    record_hit(
+                        mgr, PZ_HIT_PROJECTILE, hit_pos, proj->floor_level);
 
                     proj->active = false;
                     other->active = false;
@@ -325,13 +328,15 @@ pz_projectile_update(pz_projectile_manager *mgr, const pz_map *map,
                             ray.normal.y, proj->bounces_remaining);
 
                         // Record ricochet event for sound
-                        record_hit(mgr, PZ_HIT_WALL_RICOCHET, ray.point);
+                        record_hit(mgr, PZ_HIT_WALL_RICOCHET, ray.point,
+                            proj->floor_level);
 
                         // Continue the loop to process remaining movement
                         continue;
                     } else {
                         // No bounces left - destroy
-                        record_hit(mgr, PZ_HIT_WALL, ray.point);
+                        record_hit(
+                            mgr, PZ_HIT_WALL, ray.point, proj->floor_level);
 
                         proj->active = false;
                         mgr->active_count--;

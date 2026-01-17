@@ -203,6 +203,7 @@ typedef struct {
     float timer; // Remaining time
     float duration; // Total duration
     explosion_light_type type;
+    int8_t floor_level; // Floor level for multi-floor lighting
 } explosion_light;
 
 #define MAX_EXPLOSION_LIGHTS 16
@@ -1411,8 +1412,8 @@ map_session_load(map_session *session, const char *map_path)
     for (int i = 0; i < barrier_count; i++) {
         const pz_barrier_spawn *bs = pz_map_get_barrier(session->map, i);
         if (bs) {
-            pz_barrier_add(
-                session->barrier_mgr, bs->pos, bs->tile_name, bs->health);
+            pz_barrier_add(session->barrier_mgr, bs->pos, bs->tile_name,
+                bs->health, bs->floor_level);
         }
     }
 
@@ -1527,8 +1528,8 @@ map_session_reset(map_session *session)
         for (int i = 0; i < barrier_count; i++) {
             const pz_barrier_spawn *bs = pz_map_get_barrier(session->map, i);
             if (bs) {
-                pz_barrier_add(
-                    session->barrier_mgr, bs->pos, bs->tile_name, bs->health);
+                pz_barrier_add(session->barrier_mgr, bs->pos, bs->tile_name,
+                    bs->health, bs->floor_level);
             }
         }
     }
@@ -2665,8 +2666,16 @@ app_frame(void)
                     }
 
                     pz_vec2 pos = { x, y };
-                    pz_barrier_add(g_app.session.barrier_mgr, pos, "cobble",
-                        20); // default tile and health
+                    // Get floor level from tile at spawn position
+                    int8_t floor_level = 0;
+                    if (g_app.session.map) {
+                        int tx, ty;
+                        pz_map_world_to_tile(g_app.session.map, pos, &tx, &ty);
+                        floor_level
+                            = pz_map_get_height(g_app.session.map, tx, ty);
+                    }
+                    pz_barrier_add(g_app.session.barrier_mgr, pos, "cobble", 20,
+                        floor_level);
                     pz_log(PZ_LOG_INFO, PZ_LOG_CAT_GAME,
                         "Debug: spawned barrier at (%.2f, %.2f)", x, y);
                 }
@@ -3275,7 +3284,8 @@ done_script_commands:;
                         && !(tank->flags & PZ_TANK_FLAG_DEAD)) {
                         pz_barrier_resolve_collision(g_app.session.barrier_mgr,
                             &tank->pos,
-                            g_app.session.tank_mgr->collision_radius);
+                            g_app.session.tank_mgr->collision_radius,
+                            tank->floor_level);
                     }
                 }
             }
@@ -3367,12 +3377,14 @@ done_script_commands:;
                     pz_vec2 prev_pos = pz_vec2_sub(
                         proj->pos, pz_vec2_scale(proj->velocity, dt));
                     if (pz_barrier_raycast(g_app.session.barrier_mgr, prev_pos,
-                            proj->pos, &hit_pos, &hit_normal, &barrier)) {
+                            proj->pos, proj->floor_level, &hit_pos, &hit_normal,
+                            &barrier)) {
 
                         // Apply damage to barrier
                         bool destroyed = false;
                         pz_barrier_apply_damage(g_app.session.barrier_mgr,
-                            hit_pos, (float)proj->damage, &destroyed);
+                            hit_pos, (float)proj->damage, proj->floor_level,
+                            &destroyed);
 
                         // Record hit for particle effects (reuse existing
                         // system)
@@ -3435,6 +3447,9 @@ done_script_commands:;
                                         = 0.3f;
                                     g_app.session.explosion_lights[j].timer
                                         = 0.3f;
+                                    g_app.session.explosion_lights[j]
+                                        .floor_level
+                                        = barrier->floor_level;
                                     break;
                                 }
                             }
@@ -3532,6 +3547,8 @@ done_script_commands:;
                         g_app.session.explosion_lights[j].duration = 0.15f;
                         g_app.session.explosion_lights[j].timer
                             = g_app.session.explosion_lights[j].duration;
+                        g_app.session.explosion_lights[j].floor_level
+                            = hits[i].floor_level;
                         break;
                     }
                 }
@@ -3564,6 +3581,8 @@ done_script_commands:;
                             = EXPLOSION_LIGHT_MINE;
                         g_app.session.explosion_lights[j].duration = 0.35f;
                         g_app.session.explosion_lights[j].timer = 0.35f;
+                        // TODO: Add floor_level to mines for multi-floor
+                        g_app.session.explosion_lights[j].floor_level = 0;
                         break;
                     }
                 }
@@ -3609,6 +3628,8 @@ done_script_commands:;
                         g_app.session.explosion_lights[j].duration = 0.4f;
                         g_app.session.explosion_lights[j].timer
                             = g_app.session.explosion_lights[j].duration;
+                        g_app.session.explosion_lights[j].floor_level
+                            = death_events[i].floor_level;
                         break;
                     }
                 }
@@ -3868,8 +3889,8 @@ done_script_commands:;
                     cosf(tank->turret_angle), sinf(tank->turret_angle));
 
                 pz_lighting_add_spotlight(g_app.session.lighting, light_pos,
-                    light_dir_2d, light_color, 1.2f, 22.5f, PZ_PI * 0.35f,
-                    0.3f);
+                    light_dir_2d, light_color, 1.2f, 22.5f, PZ_PI * 0.35f, 0.3f,
+                    tank->floor_level);
             }
         }
 
@@ -3884,7 +3905,7 @@ done_script_commands:;
 
                 pz_lighting_add_spotlight(g_app.session.lighting, proj->pos,
                     backward_angle, proj_light_color, 0.4f, 2.8f,
-                    PZ_PI * 0.125f, 0.5f);
+                    PZ_PI * 0.125f, 0.5f, proj->floor_level);
             }
         }
 
@@ -3922,7 +3943,8 @@ done_script_commands:;
 
                 pz_lighting_add_point_light(g_app.session.lighting,
                     g_app.session.explosion_lights[i].pos, exp_color,
-                    exp_intensity, exp_radius);
+                    exp_intensity, exp_radius,
+                    g_app.session.explosion_lights[i].floor_level);
             }
         }
 
@@ -3938,8 +3960,9 @@ done_script_commands:;
             float flicker
                 = pz_powerup_get_flicker(g_app.session.powerup_mgr, i);
 
+            // TODO: Add floor_level to powerups for multi-floor support
             pz_lighting_add_point_light(g_app.session.lighting, powerup->pos,
-                powerup_color, 1.0f * flicker, 3.5f);
+                powerup_color, 1.0f * flicker, 3.5f, 0);
         }
 
         // Add mine lights (yellow glow)
@@ -3951,8 +3974,9 @@ done_script_commands:;
 
                 pz_vec3 mine_color = { 0.9f, 0.85f, 0.3f }; // Yellow
                 float intensity = mine->arm_timer > 0.0f ? 0.6f : 1.0f;
+                // TODO: Add floor_level to mines for multi-floor support
                 pz_lighting_add_point_light(g_app.session.lighting, mine->pos,
-                    mine_color, intensity, 2.5f);
+                    mine_color, intensity, 2.5f, 0);
             }
         }
 
@@ -3991,8 +4015,9 @@ done_script_commands:;
 
                     // Only add light if position is in the toxic zone
                     if (pz_toxic_cloud_is_inside(cloud, pos)) {
+                        // Toxic cloud affects all floors, use floor 0
                         pz_lighting_add_point_light(g_app.session.lighting, pos,
-                            toxic_light_color, base_intensity, light_radius);
+                            toxic_light_color, base_intensity, light_radius, 0);
                     }
                 }
             }
@@ -4166,7 +4191,8 @@ done_script_commands:;
         if (g_app.session.barrier_mgr) {
             pz_vec2 barrier_hit_pos;
             if (pz_barrier_raycast(g_app.session.barrier_mgr, ray_start,
-                    ray_end, &barrier_hit_pos, NULL, NULL)) {
+                    ray_end, g_app.session.player_tank->floor_level,
+                    &barrier_hit_pos, NULL, NULL)) {
                 float barrier_dist = pz_vec2_dist(ray_start, barrier_hit_pos);
                 float best_dist
                     = map_hit.hit ? map_hit.distance : LASER_MAX_DIST;

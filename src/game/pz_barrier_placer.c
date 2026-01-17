@@ -440,9 +440,10 @@ pz_barrier_placer_place(pz_tank *tank, pz_barrier_manager *barrier_mgr,
     };
 
     // Add barrier with lifetime from placer config
-    int barrier_id
-        = pz_barrier_add_owned(barrier_mgr, ghost->pos, placer->barrier_tile,
-            placer->barrier_health, tank->id, tint, placer->barrier_lifetime);
+    // Use tank's floor_level for multi-floor support
+    int barrier_id = pz_barrier_add_owned(barrier_mgr, ghost->pos,
+        placer->barrier_tile, placer->barrier_health, tank->floor_level,
+        tank->id, tint, placer->barrier_lifetime);
 
     if (barrier_id >= 0) {
         // Track in tank

@@ -1082,6 +1082,7 @@ pz_tank_apply_damage(pz_tank_manager *mgr, pz_tank *tank, int amount)
             event->tank_id = tank->id;
             event->pos = tank->pos;
             event->is_player = (tank->flags & PZ_TANK_FLAG_PLAYER) != 0;
+            event->floor_level = tank->floor_level;
         }
     }
 

@@ -61,6 +61,9 @@ typedef struct pz_light {
     // Spotlight-specific
     float cone_angle; // Half-angle of the cone (radians)
     float cone_softness; // Edge softness (0 = hard, 1 = very soft)
+
+    // Floor level - light only blocked by occluders at same or higher floor
+    int8_t floor_level;
 } pz_light;
 
 // Occluder (shadow caster) - axis-aligned or rotated rectangle
@@ -68,6 +71,7 @@ typedef struct pz_occluder {
     pz_vec2 position; // Center position
     pz_vec2 half_size; // Half-width and half-height
     float angle; // Rotation angle (radians)
+    int8_t floor_level; // Floor level - blocks lights at same or lower floor
 } pz_occluder;
 
 // Lighting system configuration
@@ -99,8 +103,9 @@ void pz_lighting_set_map_occluders(pz_lighting *lighting, const pz_map *map);
 void pz_lighting_clear_dynamic_occluders(pz_lighting *lighting);
 
 // Add a rectangular occluder (wall or tank)
-void pz_lighting_add_occluder(
-    pz_lighting *lighting, pz_vec2 position, pz_vec2 half_size, float angle);
+// floor_level: occluder blocks lights at same or lower floor level
+void pz_lighting_add_occluder(pz_lighting *lighting, pz_vec2 position,
+    pz_vec2 half_size, float angle, int8_t floor_level);
 
 // Add all wall occluders from a map
 void pz_lighting_add_map_occluders(pz_lighting *lighting, const pz_map *map);
@@ -113,13 +118,15 @@ void pz_lighting_add_map_occluders(pz_lighting *lighting, const pz_map *map);
 void pz_lighting_clear_lights(pz_lighting *lighting);
 
 // Add a point light (returns light index, or -1 if full)
+// floor_level: light is only blocked by occluders at same or higher floor
 int pz_lighting_add_point_light(pz_lighting *lighting, pz_vec2 position,
-    pz_vec3 color, float intensity, float radius);
+    pz_vec3 color, float intensity, float radius, int8_t floor_level);
 
 // Add a spotlight (returns light index, or -1 if full)
+// floor_level: light is only blocked by occluders at same or higher floor
 int pz_lighting_add_spotlight(pz_lighting *lighting, pz_vec2 position,
     float direction, pz_vec3 color, float intensity, float radius,
-    float cone_angle, float cone_softness);
+    float cone_angle, float cone_softness, int8_t floor_level);
 
 // Get light by index for modification
 pz_light *pz_lighting_get_light(pz_lighting *lighting, int index);

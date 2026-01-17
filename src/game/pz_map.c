@@ -1799,6 +1799,9 @@ pz_map_rebuild_spawns_from_tags(pz_map *map)
                 sizeof(bs->tile_name) - 1);
             bs->tile_name[sizeof(bs->tile_name) - 1] = '\0';
             bs->health = def->data.barrier.health;
+            // Set floor level from the tile height where barrier is placed
+            bs->floor_level
+                = pz_map_get_height(map, placement->tile_x, placement->tile_y);
         } break;
         case PZ_TAG_JUMP_PAD: {
             // Accumulate start/landing tiles per id
