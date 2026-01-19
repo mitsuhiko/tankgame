@@ -1494,14 +1494,17 @@ pz_tank_render(pz_tank_manager *mgr, pz_renderer *renderer,
 
         float jump_height = tank->jump_height;
 
+        // Base Y offset from floor level (for multi-floor maps)
+        float floor_y_offset = tank->floor_level * PZ_WALL_HEIGHT_UNIT;
+
         if (mgr->shadow_pipeline != PZ_INVALID_HANDLE && mgr->shadow_mesh
             && mgr->shadow_mesh->uploaded) {
             pz_renderer_set_uniform_vec2(renderer, mgr->shader,
                 "u_shadow_params", (pz_vec2) { SHADOW_SOFTNESS, 1.0f });
             pz_mat4 shadow_model = pz_mat4_identity();
             shadow_model = pz_mat4_mul(shadow_model,
-                pz_mat4_translate(
-                    (pz_vec3) { tank->pos.x, SHADOW_Y_OFFSET, tank->pos.y }));
+                pz_mat4_translate((pz_vec3) { tank->pos.x,
+                    SHADOW_Y_OFFSET + floor_y_offset, tank->pos.y }));
             shadow_model
                 = pz_mat4_mul(shadow_model, pz_mat4_rotate_y(tank->body_angle));
 
@@ -1542,7 +1545,8 @@ pz_tank_render(pz_tank_manager *mgr, pz_renderer *renderer,
         pz_mat4 body_model = pz_mat4_identity();
         body_model = pz_mat4_mul(body_model,
             pz_mat4_translate((pz_vec3) { tank->pos.x + recoil_x * body_recoil,
-                jump_height, tank->pos.y + recoil_z * body_recoil }));
+                floor_y_offset + jump_height,
+                tank->pos.y + recoil_z * body_recoil }));
         body_model
             = pz_mat4_mul(body_model, pz_mat4_rotate_y(tank->body_angle));
 
@@ -1569,7 +1573,8 @@ pz_tank_render(pz_tank_manager *mgr, pz_renderer *renderer,
         pz_mat4 turret_model = pz_mat4_identity();
         turret_model = pz_mat4_mul(turret_model,
             pz_mat4_translate((pz_vec3) { tank->pos.x + recoil_x,
-                TURRET_Y_OFFSET + jump_height, tank->pos.y + recoil_z }));
+                floor_y_offset + TURRET_Y_OFFSET + jump_height,
+                tank->pos.y + recoil_z }));
         turret_model
             = pz_mat4_mul(turret_model, pz_mat4_rotate_y(tank->turret_angle));
 

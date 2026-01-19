@@ -1,0 +1,72 @@
+# Tank Game Map
+name Untitled
+tile_size 2.0
+music march
+
+# Tile definitions
+tile . wood_oak_brown
+tile # wood_rustic_dark
+tile m mud_churned
+tile s slime
+
+# Object tags
+tag E1 enemy angle=0.000 type=hunter
+tag E2 enemy angle=0.000 type=hunter
+tag E3 enemy angle=0.000 type=sniper
+tag E4 enemy angle=0.000 type=hunter
+tag E5 enemy angle=0.000 type=hunter
+tag E6 enemy angle=0.000 type=hunter
+tag P1 spawn angle=0.000 team=0 team_spawn=0
+tag W1 powerup type=machine_gun respawn=5.0
+tag B1 barrier tile=wood_oak_brown health=30.0
+
+water_level -1
+water_color 0.00 1.00 1.00
+wave_strength 5.0
+wind_direction 6.00
+wind_strength 5.0
+
+fog_level -1
+fog_color 0.00 1.00 1.00
+
+toxic_cloud enabled
+toxic_delay 10.0
+toxic_duration 90.0
+toxic_safe_zone 0.20
+toxic_damage 1
+toxic_interval 5.0
+toxic_slowdown 0.70
+toxic_color 0.20 0.80 0.30
+toxic_center 13.50 11.00
+
+<grid>
+   4.    5.    3.    3.   -1.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3.    3. 
+   3.    0.   -1.   -1.   -1.    0.    0.    0.    3.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0s    0s    0s    0.    3. 
+   3. 0.|E3   -1.   -1.   -1. 0.|E3    0.    0.    3.    0. 0.|W1    0.    0.    0m    0m    0m    0m    0m    0m    0.    0m    0m    0m    0.    0.    0.    0.    3. 
+   3.    0.   -1.   -1.   -1.    0.    0m    0.    3.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.   -1.   -1.   -1.    0.    0.    0.    0.    0.    3. 
+   3. 0.|W1    0.   -1.   -1. 0.|W1    0m    0. 2.|B1    0.   -1.   -1.   -1.    0m    0.    0s    0s    0s    0.   -1.   -1.   -1.   -1.    0. 0.|E1    0.    0.    3. 
+   3.    0m    0.   -1.   -1.    0.    0m    0. 1.|B1    0.   -1.   -1.   -1.    0m    0.    0s    0s    0s    0.   -1s    0m    0m   -1.    0.    0.    0.    0.    3. 
+   3.    0m    0.   -1.   -1.    0.    0m    0. 0.|B1    0.    0.    0.   -1.    0m    0.    0s    0s    0s   -1s   -1s    0m   -1.   -1.    0.    0.    0.    0s    3. 
+   3.    0m    0.   -1.   -1.    0.    0m    0. 0.|B1    0.    0s    0.   -1.    0m    0.    0s    0s    0s   -1s   -1s    0m   -1.   -1.    0.    0.    0.    0s    3. 
+   3.    0m    0.   -1m   -1.    0.    0m    0. 1.|B1    0.    0s    0.   -1.    0m    0.    0s    0s    0.   -1s   -1s    0m   -1.   -1.    0.    0.    0.    0s    3. 
+   3.    0m    0.    0m   -1.    0m    0.    0. 2.|B1    0.    0s    0.   -1.   -1.   -1.    0.   -1.   -1.   -1s   -1s    0m   -1.   -1. 0.|W1    0.    0.    0s    3. 
+   3.    0m    0.    0m   -1.    0.    0.    0.    3.    0.    0.    0.    0.   -1.   -1.   -1.   -1.    0.    0m    0m    0.   -1.   -1.    0.    0.    0.    0.    3. 
+   3.    0m    0m    0m    0.    0.    0.    0.    3.    0.    0.    0.    0.    0m    0m   -1.    0.    0m    0m    0.    0.   -1.   -1.   -1.    0.    0.    0.    3. 
+   3.    0.    0m    0m    0.    0.    0.    0.    3.    0.    0. 0.|E1    0.    0.    0m    0m    0m    0m    0m    0m    0.    0.    0.    0.    0.    0.    0.    3. 
+   3.    0.    0.   -1.   -1.    0.    0.    0.    3.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0. 0.|E1    0.    0.    0.    3. 
+   3.    0.    0.   -1.   -1.    0m    0m    0.    3.   -2s   -2s   -1.   -1.    0.    0.    0s    0s    0s    0s    0.    0.    0.    0.    0.    0.    0.    0.    3. 
+   3. 0.|E3    0.   -1.   -1.    0m    0.    0.    3.   -2.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    3. 
+   3.    0.    0.   -1.   -1. 0.|E3    0.    0.    3.    2.    2.    2.    2.    2.    2.    2.    2.    2. 0.|B1 0.|B1 0.|B1 0.|B1    3.    3.    3.    3.    3.    3. 
+   3. 0.|W1    0.   -1.   -1. 0.|W1    0.    0.    3.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    1. 
+   3.    0.    0.   -1.   -1.    0.    0.    2.    0.    0.   -1s   -1s   -1s   -1s   -1s    0.    0.    0m    0m    0m    0m    0m    0.    0.    0.    0.    0.    1. 
+   3.    0.    0.   -1.   -1.   -2s   -2s   -1s   -1s   -1s   -1s   -1s   -1s   -1s   -1s    0.    0.    0m    0m    0m    0m    0m    0.    0. 0.|P1    0.    0.    1. 
+   3.    0.    0.    3.    0.    1.    0.    0.   -1s   -1s   -1s   -1s   -1s   -1s   -1s 0.|W1    0.    0m    0m    0m    0m    0m    0.    0.    0.    0.    0.    1. 
+   3.    0.    0.    3.    2.    1.    1.    1.    1.    1.    1.    1.    1.    1.    1.    1.    1.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    1. 
+   3.    3.    3.    3.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    0.    1.    1.    1.    1.    1.    1.    1.    1.    1.    1.    1.    1. 
+</grid>
+
+# Lighting
+sun_direction 0.40 -0.80 0.30
+sun_color 1.00 0.95 0.85
+ambient_color 0.40 0.45 0.50
+ambient_darkness 0.00

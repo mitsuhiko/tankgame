@@ -1,0 +1,42 @@
+name Three Towers
+tile_size 2.0
+music march
+
+tile . wood_pine_light
+tile # wood_rustic_dark
+tile ~ wood_oak_brown
+
+tag P1 spawn angle=0.0 team=0
+tag E1 enemy angle=3.14 type=skirmisher
+tag E2 enemy angle=3.14 type=sniper
+tag J1S jump_pad id=level01 role=start
+tag J1L jump_pad id=level01 role=landing
+tag J2S jump_pad id=level12 role=start
+tag J2L jump_pad id=level12 role=landing
+tag J3S jump_pad id=level02 role=start
+tag J3L jump_pad id=level02 role=landing
+
+<grid>
+8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+8# 8# 0. 0. 0. 0. 0. 3# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+8# 8# 0. 0. 0. 0. 0. 3# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+8# 8# 0. 0. 0. 0. 0. 0. 2~ 2~ 2~ 2~ 2~ 5# 8# 8# 8# 8# 8# 8#
+8# 8# 0. 0. 0. 0. 0. 0. 2~ 2~ 2~ 2~ 2~ 2~ 4. 4. 4. 4. 8# 8#
+8# 8# 0. 0. 0. 0. 0.|J1S 0. 2~ 2~|J1L 2~ 2~ 2~ 2~ 4. 4. 4. 4. 8# 8#
+8# 8# 0. 0.|P1 0. 0. 0. 0. 2~ 2~ 2~|E1 2~ 2~ 2~ 4. 4. 4.|E2 4. 8# 8#
+8# 8# 0. 0. 0. 0. 0. 0. 2~ 2~ 2~ 2~ 2~|J2S 2~ 4. 4.|J2L 4. 4. 8# 8#
+8# 8# 0. 0. 0. 0. 0. 0. 2~ 2~ 2~ 2~ 2~ 2~ 4. 4. 4.|J3L 4. 8# 8#
+8# 8# 0. 0. 0. 0. 0. 0. 2~ 2~ 2~ 2~ 2~ 2~ 4. 4. 4. 4. 8# 8#
+8# 8# 0. 0. 0.|J3S 0. 0. 0. 2~ 2~ 2~ 2~ 2~ 5# 8# 8# 8# 8# 8# 8#
+8# 8# 0. 0. 0. 0. 0. 3# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+8# 8# 0. 0. 0. 0. 0. 3# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8# 8#
+</grid>
+
+sun_direction 0.3 -0.8 0.4
+sun_color 0.7 0.7 0.8
+ambient_color 0.3 0.35 0.4
+ambient_darkness 0.4
+background_gradient vertical 0.4 0.5 0.7 0.7 0.6 0.5

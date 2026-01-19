@@ -192,5 +192,8 @@
 - [x] MF4: floor-aware lighting (lights only blocked by occluders at same or higher floor)
 - [x] MF5: barrier floor_level from map tile height
 - [x] MF6: death/hit events carry floor_level for explosion lights
+- [x] MF9: tank rendering Y-offset based on floor_level
+- [x] MF10: speed_multiplier/friction work on elevated floors (removed height!=0 block)
+- [x] MF11: three_towers.map test map (3 floors: 0, 2, 4)
 - [ ] MF7: floor_level for powerups (currently hardcoded to 0)
 - [ ] MF8: floor_level for mines (currently hardcoded to 0)

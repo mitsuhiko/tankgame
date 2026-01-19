@@ -578,11 +578,9 @@ pz_map_get_speed_multiplier(const pz_map *map, pz_vec2 world_pos)
         return 0.0f;
     }
 
-    // Check if solid
-    int8_t height = pz_map_get_height(map, tx, ty);
-    if (height != 0) {
-        return 0.0f; // Impassable
-    }
+    // Note: We don't check height here because multi-floor gameplay allows
+    // tanks to move on any floor level. The collision system handles blocking
+    // movement into tiles at the wrong height.
 
     // Get tile definition and look up properties from registry
     const pz_tile_def *def = pz_map_get_tile_def(map, tx, ty);
@@ -607,11 +605,8 @@ pz_map_get_friction(const pz_map *map, pz_vec2 world_pos)
         return 1.0f;
     }
 
-    // Check if solid - no friction applies
-    int8_t height = pz_map_get_height(map, tx, ty);
-    if (height != 0) {
-        return 1.0f;
-    }
+    // Note: We don't check height here because multi-floor gameplay allows
+    // tanks to move on any floor level.
 
     // Get tile definition and look up properties from registry
     const pz_tile_def *def = pz_map_get_tile_def(map, tx, ty);

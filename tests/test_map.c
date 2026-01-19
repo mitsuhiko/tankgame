@@ -201,9 +201,10 @@ TEST(map_speed_multiplier_without_registry)
     pz_map_set_cell(map, 4, 4, (pz_map_cell) { .height = 0, .tile_index = 0 });
     ASSERT_NEAR(1.0f, pz_map_get_speed_multiplier(map, center), 0.01f);
 
-    // Wall = impassable (still works without registry)
+    // Non-zero height tiles also return 1.0 (multi-floor gameplay allows
+    // movement on any floor level - collision system handles blocking)
     pz_map_set_cell(map, 4, 4, (pz_map_cell) { .height = 2, .tile_index = 1 });
-    ASSERT_NEAR(0.0f, pz_map_get_speed_multiplier(map, center), 0.01f);
+    ASSERT_NEAR(1.0f, pz_map_get_speed_multiplier(map, center), 0.01f);
 
     pz_map_destroy(map);
 }

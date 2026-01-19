@@ -18,7 +18,7 @@
 #include "../core/pz_str.h"
 
 // Wall height unit (in world units per height level)
-#define WALL_HEIGHT_UNIT 1.5f
+#define WALL_HEIGHT_UNIT PZ_WALL_HEIGHT_UNIT
 
 // Maximum number of tile textures we can cache
 #define MAX_TILE_TEXTURES 32

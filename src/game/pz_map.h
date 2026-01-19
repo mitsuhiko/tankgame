@@ -25,6 +25,10 @@ typedef struct pz_tile_registry pz_tile_registry;
 
 // Maximum map dimensions
 #define PZ_MAP_MAX_SIZE 64
+
+// Wall height unit - world units per height level
+// Used for rendering tanks at correct elevation on multi-floor maps
+#define PZ_WALL_HEIGHT_UNIT 1.5f
 #define PZ_MAP_MAX_SPAWNS 32
 #define PZ_MAP_MAX_ENEMIES 16
 #define PZ_MAP_MAX_POWERUPS 16

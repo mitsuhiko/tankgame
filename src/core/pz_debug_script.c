@@ -1068,6 +1068,7 @@ pz_debug_script_dump_state(const char *path, pz_tank_manager *tank_mgr,
         fprintf(f, "body_angle: %.3f\n", player->body_angle);
         fprintf(f, "turret_angle: %.3f\n", player->turret_angle);
         fprintf(f, "health: %d\n", player->health);
+        fprintf(f, "floor_level: %d\n", player->floor_level);
         fprintf(f, "flags: 0x%08x\n", player->flags);
         fprintf(f, "fire_cooldown: %.3f\n", player->fire_cooldown);
         fprintf(f, "\n");
@@ -1109,8 +1110,9 @@ pz_debug_script_dump_state(const char *path, pz_tank_manager *tank_mgr,
 
             const char *status
                 = (tank->flags & PZ_TANK_FLAG_DEAD) ? "dead" : "alive";
-            fprintf(f, "%d: pos=(%.3f, %.3f) health=%d status=%s\n", enemy_idx,
-                tank->pos.x, tank->pos.y, tank->health, status);
+            fprintf(f, "%d: pos=(%.3f, %.3f) health=%d floor=%d status=%s\n",
+                enemy_idx, tank->pos.x, tank->pos.y, tank->health,
+                tank->floor_level, status);
             enemy_idx++;
         }
         fprintf(f, "\n");
