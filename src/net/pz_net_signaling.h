@@ -11,8 +11,9 @@
 extern "C" {
 #endif
 
-// Generate a random room code (6 hex chars)
-// Returns pointer to static buffer
+// Generate a cryptographically random, human-friendly 8-character room code.
+// Returns a static buffer, or an empty string if secure randomness is
+// unavailable.
 const char *pz_signaling_generate_room(void);
 
 // Callbacks

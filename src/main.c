@@ -65,28 +65,46 @@
 #define SAPP_KEYCODE_COUNT (SAPP_KEYCODE_MENU + 1)
 
 #define NET_INPUT_QUEUE_SIZE 256
-#define NET_REMOTE_INPUT_BUFFER 256
-
-typedef struct net_input_packet {
-    uint32_t tick;
-    float move_x;
-    float move_y;
-    float turret;
-    uint8_t fire;
-    uint8_t padding[3];
-} net_input_packet;
+#define NET_SNAPSHOT_QUEUE_SIZE 8
+#define NET_EVENT_QUEUE_SIZE 64
+#define NET_INPUT_HISTORY_SIZE 256
 
 typedef struct net_input_queue {
-    net_input_packet entries[NET_INPUT_QUEUE_SIZE];
+    pz_net_input entries[NET_INPUT_QUEUE_SIZE];
     atomic_uint write_index;
     atomic_uint read_index;
 } net_input_queue;
 
-typedef struct net_input_slot {
-    uint32_t tick;
+typedef struct net_snapshot_queue {
+    pz_net_game_state entries[NET_SNAPSHOT_QUEUE_SIZE];
+    atomic_uint write_index;
+    atomic_uint read_index;
+} net_snapshot_queue;
+
+typedef struct net_event_queue {
+    pz_net_event entries[NET_EVENT_QUEUE_SIZE];
+    atomic_uint write_index;
+    atomic_uint read_index;
+} net_event_queue;
+
+typedef struct net_input_history_entry {
+    uint32_t sequence;
     pz_tank_input input;
-    bool ready;
-} net_input_slot;
+    bool valid;
+} net_input_history_entry;
+
+typedef struct net_tank_interpolation {
+    int tank_id;
+    bool initialized;
+    pz_vec2 start_pos;
+    pz_vec2 target_pos;
+    float start_body_angle;
+    float target_body_angle;
+    float start_turret_angle;
+    float target_turret_angle;
+    float elapsed;
+    float duration;
+} net_tank_interpolation;
 
 // Generate a timestamped screenshot filename
 static char *
@@ -293,20 +311,34 @@ typedef struct app_state {
     bool net_use_signaling;
     bool net_waiting_for_offer;
     bool net_waiting_for_answer;
-    char net_room_code[8];
+    bool net_signaling_fetch_in_flight;
+    bool net_signaling_failed;
+    double net_signaling_next_poll;
+    char net_room_code[16];
     const char *net_answer_payload_arg;
     atomic_bool net_channel_open;
-    uint32_t net_last_sent_tick;
+    bool net_connection_notified;
     net_input_queue net_rx_queue;
-    net_input_slot net_remote_inputs[NET_REMOTE_INPUT_BUFFER];
-    pz_tank_input net_last_remote_input;
+    net_snapshot_queue net_snapshot_rx_queue;
+    net_event_queue net_event_rx_queue;
+    pz_net_input net_last_remote_input;
     bool net_has_remote_input;
+    uint32_t net_last_remote_sequence;
+    uint32_t net_last_processed_input;
+    uint32_t net_last_processed_action;
+    uint32_t net_next_input_sequence;
+    uint32_t net_next_action_sequence;
+    uint32_t net_pending_action_sequence;
+    bool net_pending_fire_pressed;
+    bool net_pending_place_mine;
+    bool net_pending_place_barrier;
+    int net_pending_weapon_switch;
+    net_input_history_entry net_input_history[NET_INPUT_HISTORY_SIZE];
+    net_tank_interpolation net_tank_interp[PZ_NET_MAX_TANKS];
     pz_tank *net_remote_tank;
-    int net_remote_tank_id; // ID assigned to client's tank
+    int net_remote_tank_id;
     uint32_t net_snapshot_tick; // Last snapshot tick sent/received
     uint32_t net_snapshot_interval; // Ticks between snapshots (host only)
-    pz_net_game_state net_pending_snapshot; // Received snapshot to apply
-    bool net_has_pending_snapshot; // Whether we have a snapshot to apply
     pz_net_offer *join_offer;
     char *join_answer;
     char *join_answer_json;
@@ -382,99 +414,157 @@ net_input_queue_init(net_input_queue *queue)
 {
     if (!queue)
         return;
-
     atomic_store(&queue->write_index, 0u);
     atomic_store(&queue->read_index, 0u);
 }
 
 static bool
-net_input_queue_push(net_input_queue *queue, const net_input_packet *packet)
+net_input_queue_push(net_input_queue *queue, const pz_net_input *input)
 {
-    if (!queue || !packet)
+    if (!queue || !input)
         return false;
-
     unsigned int write = atomic_load(&queue->write_index);
     unsigned int read = atomic_load(&queue->read_index);
-    if (write - read >= NET_INPUT_QUEUE_SIZE) {
+    if (write - read >= NET_INPUT_QUEUE_SIZE)
         return false;
-    }
-
-    queue->entries[write % NET_INPUT_QUEUE_SIZE] = *packet;
+    queue->entries[write % NET_INPUT_QUEUE_SIZE] = *input;
     atomic_store(&queue->write_index, write + 1u);
     return true;
 }
 
 static bool
-net_input_queue_pop(net_input_queue *queue, net_input_packet *packet)
+net_input_queue_pop(net_input_queue *queue, pz_net_input *input)
 {
-    if (!queue || !packet)
+    if (!queue || !input)
         return false;
-
     unsigned int read = atomic_load(&queue->read_index);
     unsigned int write = atomic_load(&queue->write_index);
-    if (read >= write) {
+    if (read >= write)
         return false;
-    }
-
-    *packet = queue->entries[read % NET_INPUT_QUEUE_SIZE];
+    *input = queue->entries[read % NET_INPUT_QUEUE_SIZE];
     atomic_store(&queue->read_index, read + 1u);
     return true;
 }
 
 static void
-net_remote_inputs_reset(net_input_slot *slots, size_t count)
+net_snapshot_queue_init(net_snapshot_queue *queue)
 {
-    if (!slots)
+    if (!queue)
         return;
-
-    for (size_t i = 0; i < count; i++) {
-        slots[i].tick = 0;
-        slots[i].ready = false;
-    }
-}
-
-static void
-net_store_remote_input(uint32_t tick, const pz_tank_input *input)
-{
-    if (!input)
-        return;
-
-    net_input_slot *slot
-        = &g_app.net_remote_inputs[tick % NET_REMOTE_INPUT_BUFFER];
-    slot->tick = tick;
-    slot->input = *input;
-    slot->ready = true;
+    atomic_store(&queue->write_index, 0u);
+    atomic_store(&queue->read_index, 0u);
 }
 
 static bool
-net_consume_remote_input(uint32_t tick, pz_tank_input *out_input)
+net_snapshot_queue_push(
+    net_snapshot_queue *queue, const pz_net_game_state *snapshot)
 {
-    if (!out_input)
+    if (!queue || !snapshot)
         return false;
-
-    net_input_slot *slot
-        = &g_app.net_remote_inputs[tick % NET_REMOTE_INPUT_BUFFER];
-    if (!slot->ready || slot->tick != tick) {
+    unsigned int write = atomic_load(&queue->write_index);
+    unsigned int read = atomic_load(&queue->read_index);
+    if (write - read >= NET_SNAPSHOT_QUEUE_SIZE)
         return false;
-    }
-
-    *out_input = slot->input;
-    slot->ready = false;
+    queue->entries[write % NET_SNAPSHOT_QUEUE_SIZE] = *snapshot;
+    atomic_store(&queue->write_index, write + 1u);
     return true;
+}
+
+static bool
+net_snapshot_queue_pop(net_snapshot_queue *queue, pz_net_game_state *snapshot)
+{
+    if (!queue || !snapshot)
+        return false;
+    unsigned int read = atomic_load(&queue->read_index);
+    unsigned int write = atomic_load(&queue->write_index);
+    if (read >= write)
+        return false;
+    *snapshot = queue->entries[read % NET_SNAPSHOT_QUEUE_SIZE];
+    atomic_store(&queue->read_index, read + 1u);
+    return true;
+}
+
+static void
+net_event_queue_init(net_event_queue *queue)
+{
+    if (!queue)
+        return;
+    atomic_store(&queue->write_index, 0u);
+    atomic_store(&queue->read_index, 0u);
+}
+
+static bool
+net_event_queue_push(net_event_queue *queue, const pz_net_event *event)
+{
+    if (!queue || !event)
+        return false;
+    unsigned int write = atomic_load(&queue->write_index);
+    unsigned int read = atomic_load(&queue->read_index);
+    if (write - read >= NET_EVENT_QUEUE_SIZE)
+        return false;
+    queue->entries[write % NET_EVENT_QUEUE_SIZE] = *event;
+    atomic_store(&queue->write_index, write + 1u);
+    return true;
+}
+
+static bool
+net_event_queue_pop(net_event_queue *queue, pz_net_event *event)
+{
+    if (!queue || !event)
+        return false;
+    unsigned int read = atomic_load(&queue->read_index);
+    unsigned int write = atomic_load(&queue->write_index);
+    if (read >= write)
+        return false;
+    *event = queue->entries[read % NET_EVENT_QUEUE_SIZE];
+    atomic_store(&queue->read_index, read + 1u);
+    return true;
+}
+
+static bool
+net_sequence_newer(uint32_t value, uint32_t reference)
+{
+    return (int32_t)(value - reference) > 0;
 }
 
 static void
 net_drain_incoming_inputs(void)
 {
-    net_input_packet packet = { 0 };
-    while (net_input_queue_pop(&g_app.net_rx_queue, &packet)) {
-        pz_tank_input input = { 0 };
-        input.move_dir.x = packet.move_x;
-        input.move_dir.y = packet.move_y;
-        input.target_turret = packet.turret;
-        input.fire = packet.fire != 0;
-        net_store_remote_input(packet.tick, &input);
+    pz_net_input input = { 0 };
+    while (net_input_queue_pop(&g_app.net_rx_queue, &input)) {
+        if (g_app.net_has_remote_input
+            && !net_sequence_newer(
+                input.sequence, g_app.net_last_remote_sequence)) {
+            continue;
+        }
+
+        input.move_x = pz_clampf(input.move_x, -1.0f, 1.0f);
+        input.move_y = pz_clampf(input.move_y, -1.0f, 1.0f);
+        pz_vec2 move = { input.move_x, input.move_y };
+        if (pz_vec2_len_sq(move) > 1.0f) {
+            move = pz_vec2_normalize(move);
+            input.move_x = move.x;
+            input.move_y = move.y;
+        }
+        input.weapon_switch = input.weapon_switch < -1
+            ? -1
+            : (input.weapon_switch > 1 ? 1 : input.weapon_switch);
+
+        // Preserve edge-triggered actions if several unordered input packets
+        // are drained in one frame and a newer state packet overtook them.
+        if (g_app.net_has_remote_input
+            && net_sequence_newer(g_app.net_last_remote_input.action_sequence,
+                g_app.net_last_processed_action)) {
+            input.fire_pressed |= g_app.net_last_remote_input.fire_pressed;
+            input.place_mine |= g_app.net_last_remote_input.place_mine;
+            input.place_barrier |= g_app.net_last_remote_input.place_barrier;
+            if (input.weapon_switch == 0) {
+                input.weapon_switch = g_app.net_last_remote_input.weapon_switch;
+            }
+        }
+
         g_app.net_last_remote_input = input;
+        g_app.net_last_remote_sequence = input.sequence;
         g_app.net_has_remote_input = true;
     }
 }
@@ -486,10 +576,6 @@ net_handle_channel_state(bool open, void *user_data)
     atomic_store(&g_app.net_channel_open, open);
     if (open) {
         pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Data channel open");
-        // Notify debug script that connection is established
-        if (g_app.debug_script) {
-            pz_debug_script_notify_connected(g_app.debug_script);
-        }
     } else {
         pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Data channel closed");
     }
@@ -509,36 +595,29 @@ net_handle_message(const uint8_t *data, size_t len, void *user_data)
     pz_net_msg_type msg_type = pz_net_parse_header(data, len, &header);
 
     if (msg_type == PZ_NET_MSG_INPUT && g_app.net_is_host) {
-        // Host receives input from client
         pz_net_input input;
-        if (pz_net_parse_input(data, len, &input)) {
-            // Convert to old format for the input queue
-            net_input_packet packet = {
-                .tick = input.tick,
-                .move_x = input.move_x,
-                .move_y = input.move_y,
-                .turret = input.turret_angle,
-                .fire = input.fire ? 1 : 0,
-                .padding = { 0, 0, 0 },
-            };
-            if (!net_input_queue_push(&g_app.net_rx_queue, &packet)) {
-                pz_log(
-                    PZ_LOG_WARN, PZ_LOG_CAT_NET, "Dropped remote input packet");
-            }
+        if (pz_net_parse_input(data, len, &input)
+            && !net_input_queue_push(&g_app.net_rx_queue, &input)) {
+            pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET, "Dropped remote input packet");
         }
     } else if (msg_type == PZ_NET_MSG_SNAPSHOT && g_app.net_is_client) {
-        // Client receives state snapshot from host
         pz_net_game_state snapshot;
-        if (pz_net_parse_snapshot(data, len, &snapshot)) {
-            // Store for application in main loop
-            g_app.net_pending_snapshot = snapshot;
-            g_app.net_has_pending_snapshot = true;
-        } else {
-            pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET, "Failed to parse snapshot");
+        if (!pz_net_parse_snapshot(data, len, &snapshot)) {
+            pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET, "Rejected invalid snapshot");
+        } else if (!net_snapshot_queue_push(
+                       &g_app.net_snapshot_rx_queue, &snapshot)) {
+            pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET, "Dropped state snapshot");
+        }
+    } else if (msg_type == PZ_NET_MSG_EVENT && g_app.net_is_client) {
+        pz_net_event event;
+        if (!pz_net_parse_event(data, len, &event)) {
+            pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET, "Rejected invalid event");
+        } else if (!net_event_queue_push(&g_app.net_event_rx_queue, &event)) {
+            pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET, "Dropped network event");
         }
     } else {
         pz_log(PZ_LOG_DEBUG, PZ_LOG_CAT_NET,
-            "Unexpected message type %d (host=%d, client=%d)", msg_type,
+            "Ignored message type %d (host=%d, client=%d)", msg_type,
             g_app.net_is_host, g_app.net_is_client);
     }
 }
@@ -587,6 +666,12 @@ net_setup_client_from_offer(pz_net_offer *offer)
 {
     if (!offer)
         return false;
+    if (offer->version != PZ_NET_PROTOCOL_VERSION) {
+        pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
+            "Incompatible network protocol (remote=%u, local=%u)",
+            offer->version, PZ_NET_PROTOCOL_VERSION);
+        return false;
+    }
 
     if (g_app.join_offer && g_app.join_offer != offer) {
         pz_net_offer_free(g_app.join_offer);
@@ -600,7 +685,8 @@ net_setup_client_from_offer(pz_net_offer *offer)
         g_app.map_path_arg = g_app.join_offer->map_name;
     }
 
-    if (g_app.session.map_path && g_app.join_offer->map_name[0] != '\0'
+    if (g_app.session.map_path[0] != '\0'
+        && g_app.join_offer->map_name[0] != '\0'
         && strcmp(g_app.session.map_path, g_app.join_offer->map_name) != 0) {
         if (!map_session_load(&g_app.session, g_app.join_offer->map_name)) {
             pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
@@ -644,8 +730,8 @@ net_setup_client_from_offer(pz_net_offer *offer)
         return false;
     }
 
-    pz_net_offer *answer_offer = pz_net_offer_create(
-        1, "client", g_app.join_offer->map_name, answer_sdp);
+    pz_net_offer *answer_offer = pz_net_offer_create(PZ_NET_PROTOCOL_VERSION,
+        "client", g_app.join_offer->map_name, answer_sdp);
     char *answer_payload = pz_net_offer_encode_url(answer_offer);
     char *answer_json = pz_net_offer_encode_json(answer_offer);
     pz_net_offer_free(answer_offer);
@@ -679,6 +765,7 @@ net_signaling_publish_offer_done(bool success, void *user_data)
     } else {
         pz_log(
             PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to publish signaling offer");
+        g_app.net_signaling_failed = true;
     }
 }
 
@@ -691,6 +778,7 @@ net_signaling_publish_answer_done(bool success, void *user_data)
     } else {
         pz_log(
             PZ_LOG_ERROR, PZ_LOG_CAT_NET, "Failed to publish signaling answer");
+        g_app.net_signaling_failed = true;
     }
 }
 
@@ -698,14 +786,10 @@ static void
 net_signaling_answer_received(const char *message, void *user_data)
 {
     (void)user_data;
-    if (!message) {
-        // Silently retry - this happens during normal polling
-        if (g_app.net_waiting_for_answer && g_app.net_room_code[0] != '\0') {
-            pz_signaling_fetch(
-                g_app.net_room_code, "a", net_signaling_answer_received, NULL);
-        }
+    g_app.net_signaling_fetch_in_flight = false;
+    g_app.net_signaling_next_poll = pz_time_now() + 0.75;
+    if (!message)
         return;
-    }
 
     pz_net_offer *answer_offer = pz_net_offer_decode_json(message);
     if (!answer_offer) {
@@ -715,10 +799,12 @@ net_signaling_answer_received(const char *message, void *user_data)
     if (!answer_offer) {
         pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
             "Invalid signaling answer payload provided");
+        g_app.net_signaling_failed = true;
         return;
     }
 
-    net_apply_answer_offer(answer_offer);
+    if (!net_apply_answer_offer(answer_offer))
+        g_app.net_signaling_failed = true;
     pz_net_offer_free(answer_offer);
 }
 
@@ -726,20 +812,13 @@ static void
 net_signaling_offer_received(const char *message, void *user_data)
 {
     (void)user_data;
-    if (!message) {
-        // Silently retry - this happens during normal polling
-        if (g_app.net_waiting_for_offer && g_app.net_room_code[0] != '\0') {
-            pz_signaling_fetch(
-                g_app.net_room_code, "o", net_signaling_offer_received, NULL);
-        }
+    g_app.net_signaling_fetch_in_flight = false;
+    g_app.net_signaling_next_poll = pz_time_now() + 0.75;
+    if (!message)
         return;
-    }
 
-    g_app.net_waiting_for_offer = false;
-
-    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
-        "Signaling offer received, len=%zu, first100='%.100s'", strlen(message),
-        message);
+    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Signaling offer received (%zu bytes)",
+        strlen(message));
 
     pz_net_offer *offer = pz_net_offer_decode_json(message);
     if (!offer) {
@@ -749,22 +828,45 @@ net_signaling_offer_received(const char *message, void *user_data)
         pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
             "Received invalid signaling offer payload (len=%zu)",
             strlen(message));
+        g_app.net_signaling_failed = true;
         return;
     }
 
     if (!net_setup_client_from_offer(offer)) {
+        g_app.net_signaling_failed = true;
         if (g_app.join_offer == offer)
             g_app.join_offer = NULL;
         pz_net_offer_free(offer);
         return;
     }
 
+    g_app.net_waiting_for_offer = false;
     if (g_app.net_room_code[0] != '\0' && g_app.join_answer_json) {
         pz_signaling_publish(g_app.net_room_code, "a", g_app.join_answer_json,
             net_signaling_publish_answer_done, NULL);
     } else if (g_app.net_room_code[0] != '\0') {
         pz_log(PZ_LOG_WARN, PZ_LOG_CAT_NET,
             "No signaling answer payload available to publish");
+    }
+}
+
+static void
+net_signaling_poll(void)
+{
+    if (g_app.net_signaling_failed || g_app.net_signaling_fetch_in_flight
+        || g_app.net_room_code[0] == '\0'
+        || pz_time_now() < g_app.net_signaling_next_poll) {
+        return;
+    }
+
+    if (g_app.net_waiting_for_answer) {
+        g_app.net_signaling_fetch_in_flight = true;
+        pz_signaling_fetch(
+            g_app.net_room_code, "a", net_signaling_answer_received, NULL);
+    } else if (g_app.net_waiting_for_offer) {
+        g_app.net_signaling_fetch_in_flight = true;
+        pz_signaling_fetch(
+            g_app.net_room_code, "o", net_signaling_offer_received, NULL);
     }
 }
 
@@ -799,30 +901,68 @@ net_try_consume_pipe_command(const char *commands)
     return true;
 }
 
-static void
-net_send_input(uint32_t tick, const pz_tank_input *input)
+static uint32_t
+net_send_input(const pz_tank_input *input, pz_vec2 cursor, bool fire_pressed,
+    bool place_mine, bool place_barrier, int weapon_switch)
 {
-    if (!input || !g_app.net_webrtc)
-        return;
+    if (!input || !g_app.net_webrtc || !atomic_load(&g_app.net_channel_open)) {
+        return 0;
+    }
 
-    if (!atomic_load(&g_app.net_channel_open))
-        return;
-
+    uint32_t sequence = ++g_app.net_next_input_sequence;
     pz_net_input net_input = {
-        .tick = tick,
+        .sequence = sequence,
+        .last_host_tick = g_app.net_snapshot_tick,
+        .action_sequence = g_app.net_pending_action_sequence,
         .move_x = input->move_dir.x,
         .move_y = input->move_dir.y,
         .turret_angle = input->target_turret,
-        .fire = input->fire,
-        .place_mine = false,
-        .place_barrier = false,
-        .weapon_switch = 0,
+        .cursor_x = cursor.x,
+        .cursor_y = cursor.y,
+        .fire_held = input->fire,
+        .fire_pressed = fire_pressed,
+        .place_mine = place_mine,
+        .place_barrier = place_barrier,
+        .weapon_switch = weapon_switch,
     };
 
     size_t len = 0;
     uint8_t *data = pz_net_serialize_input(&net_input, &len);
+    bool sent = data && pz_net_webrtc_send_game(g_app.net_webrtc, data, len);
+    pz_free(data);
+    if (!sent)
+        return 0;
+
+    net_input_history_entry *history
+        = &g_app.net_input_history[sequence % NET_INPUT_HISTORY_SIZE];
+    history->sequence = sequence;
+    history->input = *input;
+    history->valid = true;
+    return sequence;
+}
+
+static void
+net_send_event(pz_net_event_type type, pz_vec2 pos, int entity_id,
+    int8_t floor_level, uint8_t extra0, uint8_t extra1)
+{
+    if (!g_app.net_is_host || !g_app.net_webrtc
+        || !atomic_load(&g_app.net_channel_open)) {
+        return;
+    }
+
+    pz_net_event event = {
+        .tick = (uint32_t)pz_sim_tick(g_app.sim),
+        .type = type,
+        .pos_x = pos.x,
+        .pos_y = pos.y,
+        .entity_id = entity_id,
+        .floor_level = floor_level,
+        .extra = { extra0, extra1 },
+    };
+    size_t len = 0;
+    uint8_t *data = pz_net_serialize_event(&event, &len);
     if (data) {
-        pz_net_webrtc_send(g_app.net_webrtc, data, len);
+        pz_net_webrtc_send_reliable(g_app.net_webrtc, data, len);
         pz_free(data);
     }
 }
@@ -833,13 +973,15 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
 {
     memset(state, 0, sizeof(*state));
     state->tick = tick;
+    state->last_processed_input = g_app.net_last_processed_input;
+    state->last_processed_action = g_app.net_last_processed_action;
     state->local_tank_id = (int8_t)g_app.net_remote_tank_id;
 
     // Tanks
     if (g_app.session.tank_mgr) {
         pz_tank_manager *mgr = g_app.session.tank_mgr;
         for (int i = 0;
-             i < PZ_MAX_TANKS && state->tank_count < PZ_NET_MAX_TANKS; i++) {
+            i < PZ_MAX_TANKS && state->tank_count < PZ_NET_MAX_TANKS; i++) {
             pz_tank *tank = &mgr->tanks[i];
             if (!(tank->flags & PZ_TANK_FLAG_ACTIVE)) {
                 continue;
@@ -855,6 +997,18 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
             ts->vel_y = tank->vel.y;
             ts->body_angle = tank->body_angle;
             ts->turret_angle = tank->turret_angle;
+            ts->floor_level = tank->floor_level;
+            ts->jump_state = (uint8_t)tank->jump_state;
+            ts->jump_timer = tank->jump_timer;
+            ts->jump_duration = tank->jump_duration;
+            ts->jump_start_x = tank->jump_start_pos.x;
+            ts->jump_start_y = tank->jump_start_pos.y;
+            ts->jump_end_x = tank->jump_end_pos.x;
+            ts->jump_end_y = tank->jump_end_pos.y;
+            ts->jump_start_angle = tank->jump_start_angle;
+            ts->jump_end_angle = tank->jump_end_angle;
+            ts->jump_height = tank->jump_height;
+            ts->jump_apex_height = tank->jump_apex_height;
             ts->current_weapon = (uint8_t)pz_tank_get_current_weapon(tank);
             ts->mine_count = (uint8_t)tank->mine_count;
             ts->loadout_count = (uint8_t)tank->loadout_count;
@@ -868,8 +1022,8 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
     if (g_app.session.projectile_mgr) {
         pz_projectile_manager *mgr = g_app.session.projectile_mgr;
         for (int i = 0; i < PZ_MAX_PROJECTILES
-             && state->projectile_count < PZ_NET_MAX_PROJECTILES;
-             i++) {
+            && state->projectile_count < PZ_NET_MAX_PROJECTILES;
+            i++) {
             pz_projectile *proj = &mgr->projectiles[i];
             if (!proj->active) {
                 continue;
@@ -886,6 +1040,7 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
             ps->vel_y = proj->velocity.y;
             ps->lifetime = proj->lifetime;
             ps->scale = proj->scale;
+            ps->floor_level = proj->floor_level;
             ps->color_r = (uint8_t)(proj->color.x * 255.0f);
             ps->color_g = (uint8_t)(proj->color.y * 255.0f);
             ps->color_b = (uint8_t)(proj->color.z * 255.0f);
@@ -896,8 +1051,8 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
     if (g_app.session.powerup_mgr) {
         pz_powerup_manager *mgr = g_app.session.powerup_mgr;
         for (int i = 0;
-             i < PZ_MAX_POWERUPS && state->powerup_count < PZ_NET_MAX_POWERUPS;
-             i++) {
+            i < PZ_MAX_POWERUPS && state->powerup_count < PZ_NET_MAX_POWERUPS;
+            i++) {
             pz_powerup *pu = &mgr->powerups[i];
             if (!pu->active) {
                 continue;
@@ -917,7 +1072,7 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
     if (g_app.session.mine_mgr) {
         pz_mine_manager *mgr = g_app.session.mine_mgr;
         for (int i = 0;
-             i < PZ_MAX_MINES && state->mine_count < PZ_NET_MAX_MINES; i++) {
+            i < PZ_MAX_MINES && state->mine_count < PZ_NET_MAX_MINES; i++) {
             pz_mine *mine = &mgr->mines[i];
             if (!mine->active) {
                 continue;
@@ -935,8 +1090,8 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
     if (g_app.session.barrier_mgr) {
         pz_barrier_manager *mgr = g_app.session.barrier_mgr;
         for (int i = 0;
-             i < PZ_MAX_BARRIERS && state->barrier_count < PZ_NET_MAX_BARRIERS;
-             i++) {
+            i < PZ_MAX_BARRIERS && state->barrier_count < PZ_NET_MAX_BARRIERS;
+            i++) {
             pz_barrier *barrier = pz_barrier_get(mgr, i);
             if (!barrier || !barrier->active) {
                 continue;
@@ -946,6 +1101,7 @@ net_build_snapshot(pz_net_game_state *state, uint32_t tick)
             bs->active = 1;
             bs->destroyed = barrier->destroyed ? 1 : 0;
             bs->owner_tank_id = (int8_t)barrier->owner_tank_id;
+            bs->floor_level = barrier->floor_level;
             bs->pos_x = barrier->pos.x;
             bs->pos_y = barrier->pos.y;
             bs->health = barrier->health;
@@ -972,9 +1128,54 @@ net_send_snapshot(uint32_t tick)
     size_t len = 0;
     uint8_t *data = pz_net_serialize_snapshot(&state, &len);
     if (data) {
-        pz_net_webrtc_send(g_app.net_webrtc, data, len);
+        pz_net_webrtc_send_game(g_app.net_webrtc, data, len);
         pz_free(data);
         g_app.net_snapshot_tick = tick;
+    }
+}
+
+static net_tank_interpolation *
+net_get_tank_interpolation(int tank_id)
+{
+    net_tank_interpolation *free_slot = NULL;
+    for (int i = 0; i < PZ_NET_MAX_TANKS; i++) {
+        net_tank_interpolation *interp = &g_app.net_tank_interp[i];
+        if (interp->initialized && interp->tank_id == tank_id)
+            return interp;
+        if (!interp->initialized && !free_slot)
+            free_slot = interp;
+    }
+    return free_slot;
+}
+
+static void
+net_apply_tank_state(pz_tank *tank, const pz_net_tank_state *state)
+{
+    tank->flags = state->flags;
+    tank->health = state->health;
+    tank->vel = (pz_vec2) { state->vel_x, state->vel_y };
+    tank->floor_level = state->floor_level;
+    tank->jump_state = state->jump_state;
+    tank->jump_timer = state->jump_timer;
+    tank->jump_duration = state->jump_duration;
+    tank->jump_start_pos
+        = (pz_vec2) { state->jump_start_x, state->jump_start_y };
+    tank->jump_end_pos = (pz_vec2) { state->jump_end_x, state->jump_end_y };
+    tank->jump_start_angle = state->jump_start_angle;
+    tank->jump_end_angle = state->jump_end_angle;
+    tank->jump_height = state->jump_height;
+    tank->jump_apex_height = state->jump_apex_height;
+    tank->mine_count = state->mine_count;
+    tank->loadout_count = state->loadout_count;
+    for (int i = 0; i < state->loadout_count; i++)
+        tank->loadout[i] = state->loadout[i];
+
+    tank->loadout_index = 0;
+    for (int i = 0; i < tank->loadout_count; i++) {
+        if (tank->loadout[i] == state->current_weapon) {
+            tank->loadout_index = i;
+            break;
+        }
     }
 }
 
@@ -985,45 +1186,67 @@ net_apply_snapshot(const pz_net_game_state *state)
     if (!g_app.net_is_client || !state)
         return;
 
-    // Apply tank states
+    if (g_app.net_snapshot_tick != 0
+        && !net_sequence_newer(state->tick, g_app.net_snapshot_tick)) {
+        return;
+    }
+
+    // Tank IDs and spawn order are authoritative. Rebind the convenience
+    // pointers from the snapshot so the client always controls the tank the
+    // host assigned, independent of local spawn order.
     if (g_app.session.tank_mgr) {
         pz_tank_manager *mgr = g_app.session.tank_mgr;
+        pz_tank *local_tank = pz_tank_get_by_id(mgr, state->local_tank_id);
+        if (local_tank)
+            g_app.session.player_tank = local_tank;
+
         for (int i = 0; i < state->tank_count; i++) {
             const pz_net_tank_state *ts = &state->tanks[i];
             if (!ts->active)
                 continue;
 
             pz_tank *tank = pz_tank_get_by_id(mgr, ts->id);
-            if (!tank) {
-                // Tank doesn't exist locally yet - this shouldn't happen
-                // in normal gameplay but skip for now
+            if (!tank)
                 continue;
-            }
 
-            // Apply state
-            tank->flags = ts->flags;
-            tank->health = ts->health;
-            tank->pos.x = ts->pos_x;
-            tank->pos.y = ts->pos_y;
-            tank->vel.x = ts->vel_x;
-            tank->vel.y = ts->vel_y;
-            tank->body_angle = ts->body_angle;
-            tank->turret_angle = ts->turret_angle;
-            tank->mine_count = ts->mine_count;
+            bool is_local = ts->id == state->local_tank_id;
+            pz_vec2 current_pos = tank->pos;
+            float current_body = tank->body_angle;
+            float current_turret = tank->turret_angle;
+            net_apply_tank_state(tank, ts);
 
-            // Apply loadout
-            tank->loadout_count = ts->loadout_count;
-            for (int j = 0; j < ts->loadout_count && j < PZ_MAX_LOADOUT_WEAPONS;
-                 j++) {
-                tank->loadout[j] = ts->loadout[j];
-            }
-            // Find index of current weapon in loadout
-            int cur_weapon = ts->current_weapon;
-            tank->loadout_index = 0;
-            for (int j = 0; j < tank->loadout_count; j++) {
-                if (tank->loadout[j] == cur_weapon) {
-                    tank->loadout_index = j;
-                    break;
+            if (is_local) {
+                tank->pos = (pz_vec2) { ts->pos_x, ts->pos_y };
+                tank->body_angle = ts->body_angle;
+                tank->turret_angle = ts->turret_angle;
+            } else {
+                g_app.net_remote_tank = tank;
+                g_app.net_remote_tank_id = tank->id;
+                net_tank_interpolation *interp
+                    = net_get_tank_interpolation(tank->id);
+                if (!interp || !interp->initialized) {
+                    tank->pos = (pz_vec2) { ts->pos_x, ts->pos_y };
+                    tank->body_angle = ts->body_angle;
+                    tank->turret_angle = ts->turret_angle;
+                    current_pos = tank->pos;
+                    current_body = tank->body_angle;
+                    current_turret = tank->turret_angle;
+                }
+                if (interp) {
+                    uint32_t tick_delta = g_app.net_snapshot_tick == 0
+                        ? g_app.net_snapshot_interval
+                        : state->tick - g_app.net_snapshot_tick;
+                    interp->tank_id = tank->id;
+                    interp->initialized = true;
+                    interp->start_pos = current_pos;
+                    interp->target_pos = (pz_vec2) { ts->pos_x, ts->pos_y };
+                    interp->start_body_angle = current_body;
+                    interp->target_body_angle = ts->body_angle;
+                    interp->start_turret_angle = current_turret;
+                    interp->target_turret_angle = ts->turret_angle;
+                    interp->elapsed = 0.0f;
+                    interp->duration = pz_clampf(
+                        (float)tick_delta * pz_sim_dt(), 0.033f, 0.15f);
                 }
             }
         }
@@ -1056,6 +1279,7 @@ net_apply_snapshot(const pz_net_game_state *state)
             proj->speed = pz_vec2_len(proj->velocity);
             proj->lifetime = ps->lifetime;
             proj->scale = ps->scale;
+            proj->floor_level = ps->floor_level;
             proj->color.x = ps->color_r / 255.0f;
             proj->color.y = ps->color_g / 255.0f;
             proj->color.z = ps->color_b / 255.0f;
@@ -1095,13 +1319,10 @@ net_apply_snapshot(const pz_net_game_state *state)
     // Apply mine states - clear and recreate
     if (g_app.session.mine_mgr) {
         pz_mine_manager *mgr = g_app.session.mine_mgr;
-        // Clear existing
-        for (int i = 0; i < PZ_MAX_MINES; i++) {
+        for (int i = 0; i < PZ_MAX_MINES; i++)
             mgr->mines[i].active = false;
-        }
         mgr->active_count = 0;
 
-        // Recreate from snapshot
         for (int i = 0; i < state->mine_count && i < PZ_MAX_MINES; i++) {
             const pz_net_mine_state *ms = &state->mines[i];
             if (!ms->active)
@@ -1109,18 +1330,194 @@ net_apply_snapshot(const pz_net_game_state *state)
 
             pz_mine *mine = &mgr->mines[i];
             mine->active = true;
-            mine->pos.x = ms->pos_x;
-            mine->pos.y = ms->pos_y;
+            mine->pos = (pz_vec2) { ms->pos_x, ms->pos_y };
             mine->owner_id = ms->owner_id;
             mine->arm_timer = ms->armed ? 0.0f : 0.1f;
-            mine->owner_left_safe_zone = true; // Assume true for remote mines
+            mine->owner_left_safe_zone = true;
             mine->bob_offset = (float)(i % 10) * 0.1f;
             mine->rotation = 0.0f;
             mgr->active_count++;
         }
     }
 
+    // Barriers are authoritative too. Rebuild the compact active list without
+    // calling the noisy gameplay spawn API on every snapshot.
+    if (g_app.session.barrier_mgr) {
+        pz_barrier_manager *mgr = g_app.session.barrier_mgr;
+        pz_barrier_clear(mgr);
+        for (int i = 0; i < state->barrier_count && i < PZ_MAX_BARRIERS; i++) {
+            const pz_net_barrier_state *bs = &state->barriers[i];
+            if (!bs->active)
+                continue;
+
+            pz_barrier *barrier = &mgr->barriers[i];
+            barrier->active = true;
+            barrier->destroyed = bs->destroyed != 0;
+            barrier->owner_tank_id = bs->owner_tank_id;
+            barrier->floor_level = bs->floor_level;
+            barrier->pos = (pz_vec2) { bs->pos_x, bs->pos_y };
+            barrier->health = bs->health;
+            barrier->max_health = bs->health;
+            barrier->lifetime = bs->lifetime;
+            barrier->max_lifetime = bs->lifetime;
+            barrier->tint_color = (pz_vec4) { 1, 1, 1, 1 };
+            pz_tank *owner = pz_tank_get_by_id(
+                g_app.session.tank_mgr, barrier->owner_tank_id);
+            if (owner)
+                barrier->tint_color = owner->body_color;
+            strncpy(barrier->tile_name, state->barrier_tile_names[i],
+                sizeof(barrier->tile_name) - 1);
+            barrier->tile_name[sizeof(barrier->tile_name) - 1] = '\0';
+            mgr->active_count++;
+        }
+    }
+
+    if (g_app.net_pending_action_sequence != 0
+        && !net_sequence_newer(
+            g_app.net_pending_action_sequence, state->last_processed_action)) {
+        g_app.net_pending_action_sequence = 0;
+        g_app.net_pending_fire_pressed = false;
+        g_app.net_pending_place_mine = false;
+        g_app.net_pending_place_barrier = false;
+        g_app.net_pending_weapon_switch = 0;
+    }
+
+    // Reconcile the predicted local tank: start from the acknowledged host
+    // state, discard confirmed inputs, then replay only unacknowledged inputs.
+    for (int i = 0; i < NET_INPUT_HISTORY_SIZE; i++) {
+        net_input_history_entry *entry = &g_app.net_input_history[i];
+        if (entry->valid
+            && !net_sequence_newer(
+                entry->sequence, state->last_processed_input)) {
+            entry->valid = false;
+        }
+    }
+    if (g_app.session.player_tank
+        && !net_sequence_newer(
+            state->last_processed_input, g_app.net_next_input_sequence)) {
+        uint32_t pending
+            = g_app.net_next_input_sequence - state->last_processed_input;
+        if (pending > NET_INPUT_HISTORY_SIZE)
+            pending = NET_INPUT_HISTORY_SIZE;
+        uint32_t first = g_app.net_next_input_sequence - pending + 1;
+        for (uint32_t sequence = first;
+            pending > 0 && sequence <= g_app.net_next_input_sequence;
+            sequence++) {
+            net_input_history_entry *entry
+                = &g_app.net_input_history[sequence % NET_INPUT_HISTORY_SIZE];
+            if (entry->valid && entry->sequence == sequence) {
+                pz_tank_update(g_app.session.tank_mgr,
+                    g_app.session.player_tank, &entry->input, g_app.session.map,
+                    NULL, pz_sim_dt());
+            }
+        }
+    }
+
     g_app.net_snapshot_tick = state->tick;
+    g_app.net_last_processed_input = state->last_processed_input;
+    g_app.net_last_processed_action = state->last_processed_action;
+}
+
+static void
+net_client_visual_update(float frame_dt)
+{
+    if (!g_app.net_is_client)
+        return;
+
+    for (int i = 0; i < PZ_NET_MAX_TANKS; i++) {
+        net_tank_interpolation *interp = &g_app.net_tank_interp[i];
+        if (!interp->initialized || interp->duration <= 0.0f)
+            continue;
+        pz_tank *tank
+            = pz_tank_get_by_id(g_app.session.tank_mgr, interp->tank_id);
+        if (!tank || tank == g_app.session.player_tank)
+            continue;
+
+        interp->elapsed = pz_minf(interp->elapsed + frame_dt, interp->duration);
+        float t = interp->elapsed / interp->duration;
+        tank->pos = pz_vec2_lerp(interp->start_pos, interp->target_pos, t);
+        float body_delta = remainderf(
+            interp->target_body_angle - interp->start_body_angle, 2.0f * PZ_PI);
+        float turret_delta = remainderf(
+            interp->target_turret_angle - interp->start_turret_angle,
+            2.0f * PZ_PI);
+        tank->body_angle = interp->start_body_angle + body_delta * t;
+        tank->turret_angle = interp->start_turret_angle + turret_delta * t;
+    }
+
+    // Projectiles have no stable network ID yet; short extrapolation between
+    // authoritative snapshots is smoother and is corrected every snapshot.
+    if (g_app.session.projectile_mgr) {
+        for (int i = 0; i < PZ_MAX_PROJECTILES; i++) {
+            pz_projectile *projectile
+                = &g_app.session.projectile_mgr->projectiles[i];
+            if (projectile->active) {
+                projectile->pos = pz_vec2_add(projectile->pos,
+                    pz_vec2_scale(projectile->velocity, frame_dt));
+            }
+        }
+    }
+}
+
+static void
+net_process_received_events(void)
+{
+    pz_net_event event;
+    while (net_event_queue_pop(&g_app.net_event_rx_queue, &event)) {
+        pz_vec3 position = { event.pos_x, 0.6f, event.pos_y };
+        if (event.type == PZ_NET_EVENT_PROJECTILE_HIT) {
+            pz_smoke_config smoke = event.extra[0] == PZ_HIT_TANK
+                    || event.extra[0] == PZ_HIT_TANK_NON_FATAL
+                ? PZ_SMOKE_TANK_HIT
+                : PZ_SMOKE_BULLET_IMPACT;
+            smoke.position = position;
+            pz_particle_spawn_smoke(g_app.session.particle_mgr, &smoke);
+            if (event.extra[0] == PZ_HIT_PROJECTILE)
+                pz_game_sfx_play_bullet_hit(g_app.game_sfx);
+            else if (event.extra[0] == PZ_HIT_TANK_NON_FATAL)
+                pz_game_sfx_play_tank_hit(g_app.game_sfx);
+            else if (event.extra[0] == PZ_HIT_WALL_RICOCHET)
+                pz_game_sfx_play_ricochet(g_app.game_sfx);
+        } else if (event.type == PZ_NET_EVENT_MINE_EXPLOSION
+            || event.type == PZ_NET_EVENT_TANK_DEATH) {
+            pz_smoke_config smoke = PZ_SMOKE_TANK_EXPLOSION;
+            smoke.position = position;
+            pz_particle_spawn_smoke(g_app.session.particle_mgr, &smoke);
+            pz_game_sfx_play_tank_explosion(g_app.game_sfx, false);
+        } else if (event.type == PZ_NET_EVENT_POWERUP_COLLECT
+            || event.type == PZ_NET_EVENT_BARRIER_PLACED) {
+            pz_game_sfx_play_plop(g_app.game_sfx);
+        } else if (event.type == PZ_NET_EVENT_GUNFIRE) {
+            pz_game_sfx_play_gunfire(g_app.game_sfx);
+        } else if (event.type == PZ_NET_EVENT_JUMP) {
+            pz_game_sfx_play_jump_pad(g_app.game_sfx);
+        }
+
+        explosion_light_type light_type = EXPLOSION_LIGHT_BULLET;
+        float duration = 0.15f;
+        if (event.type == PZ_NET_EVENT_MINE_EXPLOSION) {
+            light_type = EXPLOSION_LIGHT_MINE;
+            duration = 0.35f;
+        } else if (event.type == PZ_NET_EVENT_TANK_DEATH) {
+            light_type = EXPLOSION_LIGHT_TANK;
+            duration = 0.4f;
+        }
+        if (event.type == PZ_NET_EVENT_PROJECTILE_HIT
+            || event.type == PZ_NET_EVENT_MINE_EXPLOSION
+            || event.type == PZ_NET_EVENT_TANK_DEATH) {
+            for (int i = 0; i < MAX_EXPLOSION_LIGHTS; i++) {
+                explosion_light *light = &g_app.session.explosion_lights[i];
+                if (light->timer <= 0.0f) {
+                    light->pos = (pz_vec2) { event.pos_x, event.pos_y };
+                    light->type = light_type;
+                    light->duration = duration;
+                    light->timer = duration;
+                    light->floor_level = event.floor_level;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 static bool
@@ -1216,10 +1613,23 @@ map_session_load(map_session *session, const char *map_path)
     // Unload any existing session first
     map_session_unload(session);
 
-    net_remote_inputs_reset(g_app.net_remote_inputs, NET_REMOTE_INPUT_BUFFER);
-    g_app.net_last_sent_tick = UINT32_MAX;
+    net_input_queue_init(&g_app.net_rx_queue);
+    net_snapshot_queue_init(&g_app.net_snapshot_rx_queue);
+    net_event_queue_init(&g_app.net_event_rx_queue);
     g_app.net_has_remote_input = false;
-    g_app.net_last_remote_input = (pz_tank_input) { 0 };
+    g_app.net_last_remote_input = (pz_net_input) { 0 };
+    g_app.net_last_remote_sequence = 0;
+    g_app.net_last_processed_input = 0;
+    g_app.net_last_processed_action = 0;
+    g_app.net_next_input_sequence = 0;
+    g_app.net_next_action_sequence = 0;
+    g_app.net_pending_action_sequence = 0;
+    g_app.net_pending_fire_pressed = false;
+    g_app.net_pending_place_mine = false;
+    g_app.net_pending_place_barrier = false;
+    g_app.net_pending_weapon_switch = 0;
+    memset(g_app.net_input_history, 0, sizeof(g_app.net_input_history));
+    memset(g_app.net_tank_interp, 0, sizeof(g_app.net_tank_interp));
 
     // Store path for hot-reload
     strncpy(session->map_path, map_path, sizeof(session->map_path) - 1);
@@ -1332,32 +1742,29 @@ map_session_load(map_session *session, const char *map_path)
 
     g_app.net_remote_tank = NULL;
     if (net_active) {
-        bool local_is_first = g_app.net_is_host;
-        pz_vec2 local_spawn
-            = local_is_first ? player_spawn_pos : remote_spawn_pos;
-        pz_vec2 net_spawn
-            = local_is_first ? remote_spawn_pos : player_spawn_pos;
-
+        // Spawn in the same authoritative order on every peer: host is tank 1
+        // at spawn 1, client is tank 2 at spawn 2. Convenience pointers differ
+        // by role, but IDs never do.
         pz_vec4 host_color = { 0.2f, 0.4f, 0.9f, 1.0f };
         pz_vec4 client_color = { 0.9f, 0.3f, 0.2f, 1.0f };
-        pz_vec4 local_color = g_app.net_is_host ? host_color : client_color;
-        pz_vec4 remote_color = g_app.net_is_host ? client_color : host_color;
+        pz_tank *host_tank = pz_tank_spawn(
+            session->tank_mgr, player_spawn_pos, host_color, true);
+        pz_tank *client_tank = pz_tank_spawn(
+            session->tank_mgr, remote_spawn_pos, client_color, true);
 
-        session->player_tank
-            = pz_tank_spawn(session->tank_mgr, local_spawn, local_color, true);
-        if (session->player_tank) {
-            pz_tank_update_floor_level(session->player_tank, session->map);
-            session->player_tank->spawn_floor_level
-                = session->player_tank->floor_level;
+        if (host_tank) {
+            pz_tank_update_floor_level(host_tank, session->map);
+            host_tank->spawn_floor_level = host_tank->floor_level;
         }
-        g_app.net_remote_tank
-            = pz_tank_spawn(session->tank_mgr, net_spawn, remote_color, true);
-        if (g_app.net_remote_tank) {
+        if (client_tank) {
+            pz_tank_update_floor_level(client_tank, session->map);
+            client_tank->spawn_floor_level = client_tank->floor_level;
+        }
+
+        session->player_tank = g_app.net_is_host ? host_tank : client_tank;
+        g_app.net_remote_tank = g_app.net_is_host ? client_tank : host_tank;
+        if (g_app.net_remote_tank)
             g_app.net_remote_tank_id = g_app.net_remote_tank->id;
-            pz_tank_update_floor_level(g_app.net_remote_tank, session->map);
-            g_app.net_remote_tank->spawn_floor_level
-                = g_app.net_remote_tank->floor_level;
-        }
     } else {
         session->player_tank = pz_tank_spawn(session->tank_mgr,
             player_spawn_pos, (pz_vec4) { 0.2f, 0.4f, 0.9f, 1.0f }, true);
@@ -1712,20 +2119,17 @@ fog_marks_emit(map_session *session)
 static bool
 net_is_room_code(const char *value, char *out_code, size_t out_size)
 {
-    if (!value || !out_code || out_size < 7)
+    static const char alphabet[] = "23456789abcdefghjkmnpqrstuvwxyz";
+    if (!value || !out_code || out_size < 9 || strlen(value) != 8)
         return false;
 
-    size_t len = strlen(value);
-    if (len != 6)
-        return false;
-
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)value[i];
-        if (!isxdigit(c))
+    for (size_t i = 0; i < 8; i++) {
+        char c = (char)tolower((unsigned char)value[i]);
+        if (!strchr(alphabet, c))
             return false;
-        out_code[i] = (char)tolower(c);
+        out_code[i] = c;
     }
-    out_code[len] = '\0';
+    out_code[8] = '\0';
     return true;
 }
 
@@ -1779,15 +2183,27 @@ parse_args(int argc, char *argv[])
     g_app.net_use_signaling = false;
     g_app.net_waiting_for_offer = false;
     g_app.net_waiting_for_answer = false;
+    g_app.net_signaling_fetch_in_flight = false;
+    g_app.net_signaling_failed = false;
+    g_app.net_signaling_next_poll = 0.0;
     g_app.net_room_code[0] = '\0';
     g_app.net_answer_payload_arg = NULL;
-    g_app.net_last_sent_tick = UINT32_MAX;
     g_app.net_has_remote_input = false;
+    g_app.net_last_remote_input = (pz_net_input) { 0 };
+    g_app.net_last_remote_sequence = 0;
+    g_app.net_last_processed_input = 0;
+    g_app.net_last_processed_action = 0;
+    g_app.net_next_input_sequence = 0;
+    g_app.net_next_action_sequence = 0;
+    g_app.net_pending_action_sequence = 0;
+    g_app.net_pending_fire_pressed = false;
+    g_app.net_pending_place_mine = false;
+    g_app.net_pending_place_barrier = false;
+    g_app.net_pending_weapon_switch = 0;
     g_app.net_remote_tank = NULL;
     g_app.net_remote_tank_id = -1;
     g_app.net_snapshot_tick = 0;
     g_app.net_snapshot_interval = 3; // ~20Hz at 60 ticks/s
-    g_app.net_has_pending_snapshot = false;
     g_app.join_offer = NULL;
     g_app.join_answer = NULL;
     g_app.join_answer_json = NULL;
@@ -1954,11 +2370,12 @@ app_init(void)
     pz_time_init();
 
     net_input_queue_init(&g_app.net_rx_queue);
-    net_remote_inputs_reset(g_app.net_remote_inputs, NET_REMOTE_INPUT_BUFFER);
+    net_snapshot_queue_init(&g_app.net_snapshot_rx_queue);
+    net_event_queue_init(&g_app.net_event_rx_queue);
     atomic_store(&g_app.net_channel_open, false);
-    g_app.net_last_sent_tick = UINT32_MAX;
+    g_app.net_connection_notified = false;
     g_app.net_has_remote_input = false;
-    g_app.net_last_remote_input = (pz_tank_input) { 0 };
+    g_app.net_last_remote_input = (pz_net_input) { 0 };
 
     if (g_app.join_payload_arg) {
         pz_net_offer *offer = pz_net_offer_decode_url(g_app.join_payload_arg);
@@ -1982,11 +2399,10 @@ app_init(void)
         g_app.net_waiting_for_offer = true;
         pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
             "Waiting for signaling offer in room %s", g_app.net_room_code);
-        pz_signaling_fetch(
-            g_app.net_room_code, "o", net_signaling_offer_received, NULL);
+        g_app.net_signaling_next_poll = 0.0;
     }
 
-    if (g_app.net_is_client && !g_app.map_path_arg) {
+    if ((g_app.net_is_host || g_app.net_is_client) && !g_app.map_path_arg) {
         g_app.map_path_arg = "assets/maps/night_arena.map";
     }
 
@@ -2252,8 +2668,8 @@ app_init(void)
                 return;
             }
 
-            pz_net_offer *offer = pz_net_offer_create(
-                1, "host", g_app.session.map_path, offer_sdp);
+            pz_net_offer *offer = pz_net_offer_create(PZ_NET_PROTOCOL_VERSION,
+                "host", g_app.session.map_path, offer_sdp);
             char *offer_json = pz_net_offer_encode_json(offer);
             pz_net_offer_free(offer);
             pz_free(offer_sdp);
@@ -2266,6 +2682,11 @@ app_init(void)
             }
 
             const char *room = pz_signaling_generate_room();
+            if (!room || room[0] == '\0') {
+                pz_free(offer_json);
+                sapp_quit();
+                return;
+            }
             strncpy(g_app.net_room_code, room, sizeof(g_app.net_room_code) - 1);
             g_app.net_room_code[sizeof(g_app.net_room_code) - 1] = '\0';
             g_app.net_waiting_for_answer = true;
@@ -2278,8 +2699,7 @@ app_init(void)
                 g_app.net_room_code);
             pz_signaling_publish(g_app.net_room_code, "o", offer_json,
                 net_signaling_publish_offer_done, NULL);
-            pz_signaling_fetch(
-                g_app.net_room_code, "a", net_signaling_answer_received, NULL);
+            g_app.net_signaling_next_poll = 0.0;
             pz_free(offer_json);
 
             if (g_app.net_answer_payload_arg) {
@@ -2474,6 +2894,16 @@ app_frame(void)
 
     if (g_app.net_use_signaling) {
         pz_signaling_update();
+        net_signaling_poll();
+    }
+
+    bool net_channel_open_now = atomic_load(&g_app.net_channel_open);
+    if (net_channel_open_now && !g_app.net_connection_notified) {
+        if (g_app.debug_script)
+            pz_debug_script_notify_connected(g_app.debug_script);
+        g_app.net_connection_notified = true;
+    } else if (!net_channel_open_now) {
+        g_app.net_connection_notified = false;
     }
 
     // Process debug script commands (may trigger actions like load map,
@@ -2722,9 +3152,11 @@ app_frame(void)
                         char *offer_sdp = pz_net_webrtc_create_offer(
                             g_app.net_webrtc, 10000);
                         if (offer_sdp) {
-                            pz_net_offer *offer = pz_net_offer_create(1, "host",
-                                g_app.session.map_path ? g_app.session.map_path
-                                                       : "",
+                            pz_net_offer *offer = pz_net_offer_create(
+                                PZ_NET_PROTOCOL_VERSION, "host",
+                                g_app.session.map_path[0] != '\0'
+                                    ? g_app.session.map_path
+                                    : "",
                                 offer_sdp);
                             char *offer_url = pz_net_offer_encode_url(offer);
                             pz_net_offer_free(offer);
@@ -2735,6 +3167,8 @@ app_frame(void)
                                     "Debug: wrote offer to '%s'", offer_path);
                                 pz_free(offer_url);
                                 g_app.net_is_host = true;
+                                pz_campaign_destroy(g_app.campaign_mgr);
+                                g_app.campaign_mgr = pz_campaign_create();
 
                                 // Reload the map if already loaded to set up
                                 // networking (create net_remote_tank)
@@ -2794,8 +3228,10 @@ app_frame(void)
                                             g_app.net_webrtc, 10000);
                                     if (answer_sdp) {
                                         pz_net_offer *answer
-                                            = pz_net_offer_create(1, "client",
-                                                offer->map_name, answer_sdp);
+                                            = pz_net_offer_create(
+                                                PZ_NET_PROTOCOL_VERSION,
+                                                "client", offer->map_name,
+                                                answer_sdp);
                                         char *answer_url
                                             = pz_net_offer_encode_url(answer);
                                         pz_net_offer_free(answer);
@@ -2808,6 +3244,10 @@ app_frame(void)
                                                 answer_path);
                                             pz_free(answer_url);
                                             g_app.net_is_client = true;
+                                            pz_campaign_destroy(
+                                                g_app.campaign_mgr);
+                                            g_app.campaign_mgr
+                                                = pz_campaign_create();
 
                                             // Load the map from the offer
                                             if (map_name[0] != '\0') {
@@ -2909,14 +3349,17 @@ done_script_commands:;
         pz_editor_update(g_app.editor, frame_dt);
     } else {
         bool net_active = g_app.net_is_host || g_app.net_is_client;
-        if (net_active) {
+        if (g_app.net_is_host)
             net_drain_incoming_inputs();
-
-            // Client: apply pending snapshot from host
-            if (g_app.net_is_client && g_app.net_has_pending_snapshot) {
-                net_apply_snapshot(&g_app.net_pending_snapshot);
-                g_app.net_has_pending_snapshot = false;
+        if (g_app.net_is_client) {
+            pz_net_game_state latest_snapshot;
+            bool have_snapshot = false;
+            while (net_snapshot_queue_pop(
+                &g_app.net_snapshot_rx_queue, &latest_snapshot)) {
+                have_snapshot = true;
             }
+            if (have_snapshot)
+                net_apply_snapshot(&latest_snapshot);
         }
 
         bool net_channel_open
@@ -2927,6 +3370,9 @@ done_script_commands:;
 
         // Gather input (once per frame)
         pz_tank_input player_input = { 0 };
+        pz_vec2 player_cursor = g_app.session.player_tank
+            ? g_app.session.player_tank->pos
+            : (pz_vec2) { 0, 0 };
 
         // Check if debug script is providing input
         const pz_debug_script_input *script_input = g_app.debug_script
@@ -2941,10 +3387,12 @@ done_script_commands:;
             player_input.move_dir.y = script_input->move_y;
 
             if (script_input->has_aim && g_app.session.player_tank) {
+                player_cursor
+                    = (pz_vec2) { script_input->aim_x, script_input->aim_y };
                 float aim_dx
-                    = script_input->aim_x - g_app.session.player_tank->pos.x;
+                    = player_cursor.x - g_app.session.player_tank->pos.x;
                 float aim_dz
-                    = script_input->aim_y - g_app.session.player_tank->pos.y;
+                    = player_cursor.y - g_app.session.player_tank->pos.y;
                 player_input.target_turret = atan2f(aim_dx, aim_dz);
             }
 
@@ -2972,31 +3420,57 @@ done_script_commands:;
                 && !(g_app.session.player_tank->flags & PZ_TANK_FLAG_DEAD)) {
                 pz_vec3 mouse_world = pz_camera_screen_to_world(
                     &g_app.camera, (int)g_app.mouse_x, (int)g_app.mouse_y);
-                float aim_dx = mouse_world.x - g_app.session.player_tank->pos.x;
-                float aim_dz = mouse_world.z - g_app.session.player_tank->pos.y;
+                player_cursor = (pz_vec2) { mouse_world.x, mouse_world.z };
+                float aim_dx
+                    = player_cursor.x - g_app.session.player_tank->pos.x;
+                float aim_dz
+                    = player_cursor.y - g_app.session.player_tank->pos.y;
                 player_input.target_turret = atan2f(aim_dx, aim_dz);
                 player_input.fire = g_app.mouse_left_down || g_app.space_down;
             }
         }
 
-        // Handle weapon cycling (once per frame, not per sim tick)
-        if (g_app.session.player_tank
+        bool player_fire_pressed
+            = g_app.mouse_left_just_pressed || g_app.space_just_pressed;
+        bool player_place_mine
+            = g_app.mouse_right_just_pressed || g_app.key_g_just_pressed;
+        if (use_script_input && script_input->fire)
+            player_fire_pressed = true;
+
+        // Handle weapon cycling once per frame and include it in client input.
+        int player_weapon_switch = 0;
+        if (g_app.scroll_accumulator >= 3.0f) {
+            player_weapon_switch = 1;
+            g_app.scroll_accumulator = 0.0f;
+        } else if (g_app.scroll_accumulator <= -3.0f) {
+            player_weapon_switch = -1;
+            g_app.scroll_accumulator = 0.0f;
+        } else if (g_app.key_f_just_pressed) {
+            player_weapon_switch = 1;
+        } else if (script_input && script_input->weapon_cycle != 0) {
+            player_weapon_switch = script_input->weapon_cycle > 0 ? 1 : -1;
+        }
+        if (player_weapon_switch != 0 && g_app.session.player_tank
             && !(g_app.session.player_tank->flags & PZ_TANK_FLAG_DEAD)) {
-            if (g_app.scroll_accumulator >= 3.0f) {
-                pz_tank_cycle_weapon(g_app.session.player_tank, 1);
-                g_app.scroll_accumulator = 0.0f;
-            } else if (g_app.scroll_accumulator <= -3.0f) {
-                pz_tank_cycle_weapon(g_app.session.player_tank, -1);
-                g_app.scroll_accumulator = 0.0f;
+            pz_tank_cycle_weapon(
+                g_app.session.player_tank, player_weapon_switch);
+        }
+        bool player_place_barrier = g_app.session.player_tank
+            && pz_tank_get_current_weapon(g_app.session.player_tank)
+                == PZ_POWERUP_BARRIER_PLACER
+            && player_fire_pressed;
+        if (g_app.net_is_client) {
+            bool new_action = player_fire_pressed || player_place_mine
+                || player_place_barrier || player_weapon_switch != 0;
+            if (new_action && g_app.net_pending_action_sequence == 0) {
+                g_app.net_pending_action_sequence
+                    = ++g_app.net_next_action_sequence;
             }
-            if (g_app.key_f_just_pressed) {
-                pz_tank_cycle_weapon(g_app.session.player_tank, 1);
-            }
-            // Debug script weapon cycling
-            if (script_input && script_input->weapon_cycle != 0) {
-                pz_tank_cycle_weapon(
-                    g_app.session.player_tank, script_input->weapon_cycle);
-            }
+            g_app.net_pending_fire_pressed |= player_fire_pressed;
+            g_app.net_pending_place_mine |= player_place_mine;
+            g_app.net_pending_place_barrier |= player_place_barrier;
+            if (player_weapon_switch != 0)
+                g_app.net_pending_weapon_switch = player_weapon_switch;
         }
 
         sim_start_us = pz_time_now_us();
@@ -3007,36 +3481,48 @@ done_script_commands:;
         // Clients: only send input, don't simulate (host is authoritative)
         // =========================================================================
 
-        // Client: just send input each tick, skip simulation
-        if (g_app.net_is_client && net_channel_open) {
+        // Clients predict only their own movement. The host remains
+        // authoritative for combat and all world entities.
+        if (g_app.net_is_client) {
             for (int tick = 0; tick < sim_ticks && g_app.session.map; tick++) {
-                uint32_t sim_tick = (uint32_t)pz_sim_tick(g_app.sim);
-                if (g_app.net_last_sent_tick != sim_tick) {
-                    net_send_input(sim_tick, &player_input);
-                    g_app.net_last_sent_tick = sim_tick;
-                }
                 pz_sim_begin_tick(g_app.sim);
+                if (net_channel_open) {
+                    uint32_t sequence = net_send_input(&player_input,
+                        player_cursor, g_app.net_pending_fire_pressed,
+                        g_app.net_pending_place_mine,
+                        g_app.net_pending_place_barrier,
+                        g_app.net_pending_weapon_switch);
+                    if (sequence != 0) {
+                        if (g_app.session.player_tank) {
+                            pz_tank_update(g_app.session.tank_mgr,
+                                g_app.session.player_tank, &player_input,
+                                g_app.session.map, NULL, dt);
+                        }
+                    }
+                }
                 pz_sim_end_tick(g_app.sim);
             }
-            // Skip to after simulation loop
             goto after_simulation;
         }
 
         for (int tick = 0; tick < sim_ticks && g_app.session.map; tick++) {
             uint32_t sim_tick = (uint32_t)pz_sim_tick(g_app.sim);
             pz_tank_input remote_input = { 0 };
-            if (net_active && g_app.net_remote_tank) {
-                if (net_channel_open && g_app.net_last_sent_tick != sim_tick) {
-                    net_send_input(sim_tick, &player_input);
-                    g_app.net_last_sent_tick = sim_tick;
-                }
-
-                if (net_channel_open
-                    && !net_consume_remote_input(sim_tick, &remote_input)) {
-                    if (g_app.net_has_remote_input) {
-                        remote_input = g_app.net_last_remote_input;
-                    }
-                }
+            pz_net_input remote_net_input = { 0 };
+            bool remote_new_input = false;
+            bool remote_new_action = false;
+            if (g_app.net_is_host && net_channel_open && g_app.net_remote_tank
+                && g_app.net_has_remote_input) {
+                remote_net_input = g_app.net_last_remote_input;
+                remote_input.move_dir = (pz_vec2) { remote_net_input.move_x,
+                    remote_net_input.move_y };
+                remote_input.target_turret = remote_net_input.turret_angle;
+                remote_input.fire = remote_net_input.fire_held;
+                remote_new_input = net_sequence_newer(
+                    remote_net_input.sequence, g_app.net_last_processed_input);
+                remote_new_action = remote_net_input.action_sequence != 0
+                    && net_sequence_newer(remote_net_input.action_sequence,
+                        g_app.net_last_processed_action);
             }
 
             pz_sim_begin_tick(g_app.sim);
@@ -3073,6 +3559,11 @@ done_script_commands:;
                         g_app.session.player_tank, (int)collected);
                     pz_log(PZ_LOG_INFO, PZ_LOG_CAT_GAME, "Player collected: %s",
                         pz_powerup_type_name(collected));
+                    net_send_event(PZ_NET_EVENT_POWERUP_COLLECT,
+                        g_app.session.player_tank->pos,
+                        g_app.session.player_tank->id,
+                        g_app.session.player_tank->floor_level,
+                        (uint8_t)collected, 0);
 
                     // If barrier placer, set the barrier data on the tank
                     if (collected == PZ_POWERUP_BARRIER_PLACER) {
@@ -3108,16 +3599,8 @@ done_script_commands:;
                 const pz_weapon_stats *weapon
                     = pz_weapon_get_stats((pz_powerup_type)current_weapon);
 
-                bool fire_held = g_app.mouse_left_down || g_app.space_down;
-                bool fire_pressed
-                    = g_app.mouse_left_just_pressed || g_app.space_just_pressed;
-                // Debug script fire input (script->fire is single-press)
-                if (use_script_input && script_input->fire) {
-                    fire_pressed = true;
-                }
-                if (use_script_input && script_input->hold_fire) {
-                    fire_held = true;
-                }
+                bool fire_held = player_input.fire;
+                bool fire_pressed = player_fire_pressed;
                 bool should_fire = weapon->auto_fire ? fire_held : fire_pressed;
 
                 // Check if this is a barrier placer weapon
@@ -3135,6 +3618,10 @@ done_script_commands:;
                                 = weapon->fire_cooldown;
                             // Play placement sound
                             pz_game_sfx_play_plop(g_app.game_sfx);
+                            net_send_event(PZ_NET_EVENT_BARRIER_PLACED,
+                                g_app.session.player_tank->pos,
+                                g_app.session.player_tank->id,
+                                g_app.session.player_tank->floor_level, 0, 0);
                         }
                     }
                 } else {
@@ -3186,12 +3673,15 @@ done_script_commands:;
 
                         // Play gunfire sound
                         pz_game_sfx_play_gunfire(g_app.game_sfx);
+                        net_send_event(PZ_NET_EVENT_GUNFIRE,
+                            g_app.session.player_tank->pos,
+                            g_app.session.player_tank->id,
+                            g_app.session.player_tank->floor_level, 0, 0);
                     }
                 }
 
                 // Mine placement (right-click or G key)
-                bool place_mine = g_app.mouse_right_just_pressed
-                    || g_app.key_g_just_pressed;
+                bool place_mine = player_place_mine;
                 if (place_mine && g_app.session.player_tank->mine_count > 0
                     && g_app.session.mine_mgr) {
                     // Place mine behind the tank
@@ -3216,23 +3706,81 @@ done_script_commands:;
 
             if (g_app.net_remote_tank
                 && !(g_app.net_remote_tank->flags & PZ_TANK_FLAG_DEAD)) {
+                if (remote_new_action && remote_net_input.weapon_switch != 0) {
+                    pz_tank_cycle_weapon(
+                        g_app.net_remote_tank, remote_net_input.weapon_switch);
+                }
+
                 pz_tank_update(g_app.session.tank_mgr, g_app.net_remote_tank,
                     &remote_input, g_app.session.map, g_app.session.toxic_cloud,
                     dt);
+
+                if (g_app.session.tracks
+                    && pz_vec2_len(g_app.net_remote_tank->vel) > 0.1f) {
+                    pz_tracks_add_mark(g_app.session.tracks,
+                        g_app.net_remote_tank->id, g_app.net_remote_tank->pos.x,
+                        g_app.net_remote_tank->pos.y,
+                        g_app.net_remote_tank->body_angle, 0.45f,
+                        track_strength_for_tank(g_app.net_remote_tank));
+                }
+
+                pz_barrier_placer_data barrier_data = { 0 };
+                pz_powerup_type collected
+                    = pz_powerup_check_collection_ex(g_app.session.powerup_mgr,
+                        g_app.net_remote_tank->pos, 0.7f, &barrier_data);
+                if (collected != PZ_POWERUP_NONE) {
+                    pz_tank_add_weapon(g_app.net_remote_tank, (int)collected);
+                    if (collected == PZ_POWERUP_BARRIER_PLACER) {
+                        pz_tank_set_barrier_placer(g_app.net_remote_tank,
+                            barrier_data.barrier_tile,
+                            barrier_data.barrier_health,
+                            barrier_data.barrier_count,
+                            barrier_data.barrier_lifetime);
+                    }
+                    net_send_event(PZ_NET_EVENT_POWERUP_COLLECT,
+                        g_app.net_remote_tank->pos, g_app.net_remote_tank->id,
+                        g_app.net_remote_tank->floor_level, (uint8_t)collected,
+                        0);
+                }
 
                 int current_weapon
                     = pz_tank_get_current_weapon(g_app.net_remote_tank);
                 const pz_weapon_stats *weapon
                     = pz_weapon_get_stats((pz_powerup_type)current_weapon);
-                bool should_fire = remote_input.fire;
+                bool should_fire = weapon->auto_fire
+                    ? remote_net_input.fire_held
+                    : (remote_new_action && remote_net_input.fire_pressed);
 
-                if (current_weapon != PZ_POWERUP_BARRIER_PLACER) {
+                if (current_weapon == PZ_POWERUP_BARRIER_PLACER) {
+                    if (remote_new_action && remote_net_input.place_barrier
+                        && g_app.net_remote_tank->fire_cooldown <= 0.0f) {
+                        pz_barrier_ghost ghost = { 0 };
+                        pz_barrier_placer_update_ghost(&ghost,
+                            g_app.net_remote_tank, g_app.session.map,
+                            g_app.session.barrier_mgr,
+                            g_app.session.map->tile_size,
+                            (pz_vec2) { remote_net_input.cursor_x,
+                                remote_net_input.cursor_y });
+                        int placed
+                            = pz_barrier_placer_place(g_app.net_remote_tank,
+                                g_app.session.barrier_mgr, g_app.session.map,
+                                &ghost, g_app.session.map->tile_size);
+                        if (placed >= 0) {
+                            g_app.net_remote_tank->fire_cooldown
+                                = weapon->fire_cooldown;
+                            pz_game_sfx_play_plop(g_app.game_sfx);
+                            net_send_event(PZ_NET_EVENT_BARRIER_PLACED,
+                                g_app.net_remote_tank->pos,
+                                g_app.net_remote_tank->id,
+                                g_app.net_remote_tank->floor_level, 0, 0);
+                        }
+                    }
+                } else {
                     int active_projectiles = pz_projectile_count_by_owner(
                         g_app.session.projectile_mgr,
                         g_app.net_remote_tank->id);
                     bool can_fire
                         = active_projectiles < weapon->max_active_projectiles;
-
                     if (should_fire && can_fire
                         && g_app.net_remote_tank->fire_cooldown <= 0.0f
                         && pz_tank_can_fire(g_app.net_remote_tank)) {
@@ -3252,24 +3800,47 @@ done_script_commands:;
                             .color = weapon->projectile_color,
                             .floor_level = g_app.net_remote_tank->floor_level,
                         };
-
                         int proj_slot = pz_projectile_spawn(
                             g_app.session.projectile_mgr, spawn_pos, fire_dir,
                             &proj_config, g_app.net_remote_tank->id);
                         if (proj_slot >= 0 && bounce_cost > 0) {
                             pz_projectile *proj = &g_app.session.projectile_mgr
                                                        ->projectiles[proj_slot];
-                            if (proj->bounces_remaining > 0) {
-                                proj->bounces_remaining -= 1;
-                            }
+                            if (proj->bounces_remaining > 0)
+                                proj->bounces_remaining--;
                         }
-
                         g_app.net_remote_tank->fire_cooldown
                             = weapon->fire_cooldown;
                         g_app.net_remote_tank->recoil = weapon->recoil_strength;
                         pz_game_sfx_play_gunfire(g_app.game_sfx);
+                        net_send_event(PZ_NET_EVENT_GUNFIRE,
+                            g_app.net_remote_tank->pos,
+                            g_app.net_remote_tank->id,
+                            g_app.net_remote_tank->floor_level, 0, 0);
                     }
                 }
+
+                if (remote_new_action && remote_net_input.place_mine
+                    && g_app.net_remote_tank->mine_count > 0
+                    && g_app.session.mine_mgr) {
+                    pz_vec2 back_dir
+                        = { -sinf(g_app.net_remote_tank->body_angle),
+                              -cosf(g_app.net_remote_tank->body_angle) };
+                    pz_vec2 mine_pos = pz_vec2_add(g_app.net_remote_tank->pos,
+                        pz_vec2_scale(back_dir, 1.2f));
+                    if (pz_mine_place(g_app.session.mine_mgr, mine_pos,
+                            g_app.net_remote_tank->id)
+                        >= 0) {
+                        g_app.net_remote_tank->mine_count--;
+                    }
+                }
+            }
+
+            if (remote_new_input)
+                g_app.net_last_processed_input = remote_net_input.sequence;
+            if (remote_new_action) {
+                g_app.net_last_processed_action
+                    = remote_net_input.action_sequence;
             }
 
             // Update all tanks (respawn timers, etc.)
@@ -3295,6 +3866,8 @@ done_script_commands:;
                 pz_tank *tank = &g_app.session.tank_mgr->tanks[i];
                 if (tank->just_jumped) {
                     pz_game_sfx_play_jump_pad(g_app.game_sfx);
+                    net_send_event(PZ_NET_EVENT_JUMP, tank->pos, tank->id,
+                        tank->floor_level, 0, 0);
                     tank->just_jumped = false;
                 }
             }
@@ -3317,7 +3890,7 @@ done_script_commands:;
                 // Track marks for enemy tanks
                 if (g_app.session.tracks) {
                     for (int i = 0; i < g_app.session.ai_mgr->controller_count;
-                         i++) {
+                        i++) {
                         pz_ai_controller *ctrl
                             = &g_app.session.ai_mgr->controllers[i];
                         pz_tank *enemy = pz_tank_get_by_id(
@@ -3391,11 +3964,11 @@ done_script_commands:;
                         if (g_app.session.projectile_mgr->hit_count
                             < PZ_MAX_PROJECTILE_HITS) {
                             pz_projectile_hit *hit
-                                = &g_app.session.projectile_mgr
-                                       ->hits[g_app.session.projectile_mgr
-                                                  ->hit_count++];
-                            hit->type = destroyed ? PZ_HIT_WALL : PZ_HIT_WALL;
+                                = &g_app.session.projectile_mgr->hits[g_app
+                                        .session.projectile_mgr->hit_count++];
+                            hit->type = PZ_HIT_WALL;
                             hit->pos = hit_pos;
+                            hit->floor_level = proj->floor_level;
                         }
 
                         // Destroy projectile
@@ -3448,8 +4021,7 @@ done_script_commands:;
                                     g_app.session.explosion_lights[j].timer
                                         = 0.3f;
                                     g_app.session.explosion_lights[j]
-                                        .floor_level
-                                        = barrier->floor_level;
+                                        .floor_level = barrier->floor_level;
                                     break;
                                 }
                             }
@@ -3502,6 +4074,8 @@ done_script_commands:;
         sim_end_us = pz_time_now_us();
         events_start_us = sim_end_us;
 
+        net_client_visual_update(frame_dt);
+        net_process_received_events();
         fog_marks_update(&g_app.session, frame_dt);
         fog_marks_emit(&g_app.session);
 
@@ -3512,6 +4086,8 @@ done_script_commands:;
 
             for (int i = 0; i < hit_count; i++) {
                 pz_vec3 hit_pos = { hits[i].pos.x, 1.18f, hits[i].pos.y };
+                net_send_event(PZ_NET_EVENT_PROJECTILE_HIT, hits[i].pos, -1,
+                    hits[i].floor_level, (uint8_t)hits[i].type, 0);
 
                 pz_smoke_config smoke = PZ_SMOKE_BULLET_IMPACT;
                 smoke.position = hit_pos;
@@ -3564,6 +4140,8 @@ done_script_commands:;
             for (int i = 0; i < explosion_count; i++) {
                 pz_vec3 exp_pos
                     = { explosions[i].pos.x, 0.5f, explosions[i].pos.y };
+                net_send_event(PZ_NET_EVENT_MINE_EXPLOSION, explosions[i].pos,
+                    explosions[i].owner_id, 0, 0, 0);
 
                 // Spawn explosion particles
                 pz_smoke_config explosion = PZ_SMOKE_TANK_EXPLOSION;
@@ -3612,6 +4190,9 @@ done_script_commands:;
             for (int i = 0; i < death_count; i++) {
                 pz_vec3 death_pos
                     = { death_events[i].pos.x, 0.6f, death_events[i].pos.y };
+                net_send_event(PZ_NET_EVENT_TANK_DEATH, death_events[i].pos,
+                    death_events[i].tank_id, death_events[i].floor_level,
+                    death_events[i].is_player ? 1 : 0, 0);
 
                 // Spawn explosion particles
                 pz_smoke_config explosion = PZ_SMOKE_TANK_EXPLOSION;
@@ -3689,6 +4270,13 @@ done_script_commands:;
                 g_app.session.tank_mgr, respawn_events, PZ_MAX_RESPAWN_EVENTS);
 
             for (int i = 0; i < respawn_count; i++) {
+                pz_tank *respawned = pz_tank_get_by_id(
+                    g_app.session.tank_mgr, respawn_events[i].tank_id);
+                if (respawned) {
+                    net_send_event(PZ_NET_EVENT_TANK_RESPAWN, respawned->pos,
+                        respawned->id, respawned->floor_level,
+                        respawn_events[i].is_player ? 1 : 0, 0);
+                }
                 // Clear barriers placed by the respawned tank
                 if (g_app.session.barrier_mgr) {
                     pz_barrier_clear_owned_by(
@@ -4550,19 +5138,29 @@ end_frame:;
                 fprintf(f, "mode: %s\n", g_app.net_is_host ? "host" : "client");
                 fprintf(f, "channel_open: %s\n",
                     atomic_load(&g_app.net_channel_open) ? "yes" : "no");
-                fprintf(f, "last_sent_tick: %u\n", g_app.net_last_sent_tick);
+                fprintf(f, "snapshot_tick: %u\n", g_app.net_snapshot_tick);
+                fprintf(f, "next_input_sequence: %u\n",
+                    g_app.net_next_input_sequence);
+                fprintf(f, "last_processed_input: %u\n",
+                    g_app.net_last_processed_input);
+                fprintf(f, "last_processed_action: %u\n",
+                    g_app.net_last_processed_action);
                 fprintf(f, "has_remote_input: %s\n",
                     g_app.net_has_remote_input ? "yes" : "no");
 
                 if (g_app.net_has_remote_input) {
                     fprintf(f, "last_remote_input:\n");
+                    fprintf(f, "  sequence: %u\n",
+                        g_app.net_last_remote_input.sequence);
+                    fprintf(f, "  action_sequence: %u\n",
+                        g_app.net_last_remote_input.action_sequence);
                     fprintf(f, "  move_dir: %.3f %.3f\n",
-                        g_app.net_last_remote_input.move_dir.x,
-                        g_app.net_last_remote_input.move_dir.y);
+                        g_app.net_last_remote_input.move_x,
+                        g_app.net_last_remote_input.move_y);
                     fprintf(f, "  target_turret: %.3f\n",
-                        g_app.net_last_remote_input.target_turret);
+                        g_app.net_last_remote_input.turret_angle);
                     fprintf(f, "  fire: %s\n",
-                        g_app.net_last_remote_input.fire ? "yes" : "no");
+                        g_app.net_last_remote_input.fire_held ? "yes" : "no");
                 }
 
                 if (g_app.net_remote_tank) {
@@ -4928,6 +5526,10 @@ pz_web_start_host(const char *map_path)
         return 0;
     }
 
+    // Multiplayer is a standalone match, never a campaign level.
+    pz_campaign_destroy(g_app.campaign_mgr);
+    g_app.campaign_mgr = pz_campaign_create();
+
     // Load the map first
     if (!map_session_load(&g_app.session, map_path)) {
         pz_log(PZ_LOG_ERROR, PZ_LOG_CAT_NET,
@@ -4965,8 +5567,8 @@ pz_web_start_host(const char *map_path)
         return 0;
     }
 
-    pz_net_offer *offer
-        = pz_net_offer_create(1, "host", g_app.session.map_path, offer_sdp);
+    pz_net_offer *offer = pz_net_offer_create(
+        PZ_NET_PROTOCOL_VERSION, "host", g_app.session.map_path, offer_sdp);
     char *offer_json = pz_net_offer_encode_json(offer);
     pz_net_offer_free(offer);
     pz_free(offer_sdp);
@@ -4981,6 +5583,12 @@ pz_web_start_host(const char *map_path)
 
     // Generate room code and publish
     const char *room = pz_signaling_generate_room();
+    if (!room || room[0] == '\0') {
+        pz_free(offer_json);
+        pz_net_webrtc_destroy(g_app.net_webrtc);
+        g_app.net_webrtc = NULL;
+        return 0;
+    }
     strncpy(g_app.net_room_code, room, sizeof(g_app.net_room_code) - 1);
     g_app.net_room_code[sizeof(g_app.net_room_code) - 1] = '\0';
     g_app.net_waiting_for_answer = true;
@@ -4989,14 +5597,12 @@ pz_web_start_host(const char *map_path)
 
     pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Web host: room code %s",
         g_app.net_room_code);
-    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET,
-        "Web host: offer len=%zu, first100='%.100s'", strlen(offer_json),
-        offer_json);
+    pz_log(PZ_LOG_INFO, PZ_LOG_CAT_NET, "Web host: offer ready (%zu bytes)",
+        strlen(offer_json));
 
     pz_signaling_publish(g_app.net_room_code, "o", offer_json,
         net_signaling_publish_offer_done, NULL);
-    pz_signaling_fetch(
-        g_app.net_room_code, "a", net_signaling_answer_received, NULL);
+    g_app.net_signaling_next_poll = 0.0;
     pz_free(offer_json);
 
     // Reload map to set up networking (create net_remote_tank)
@@ -5034,6 +5640,12 @@ pz_web_is_peer_connected(void)
             && atomic_load(&g_app.net_channel_open)
         ? 1
         : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int
+pz_web_net_failed(void)
+{
+    return g_app.net_signaling_failed ? 1 : 0;
 }
 
 #endif // __EMSCRIPTEN__

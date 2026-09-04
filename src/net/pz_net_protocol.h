@@ -1,9 +1,9 @@
 /*
  * Tank Game - Network Protocol
  *
- * Binary protocol for game state replication.
- * Host is authoritative - sends state snapshots to clients.
- * Clients send inputs to host.
+ * Binary protocol for host-authoritative state replication. All current
+ * targets are little-endian IEEE-754 platforms; parsers still validate every
+ * size/count before touching payload data.
  */
 
 #ifndef PZ_NET_PROTOCOL_H
@@ -13,10 +13,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../core/pz_math.h"
-
-// Protocol version (bump when breaking changes)
-#define PZ_NET_PROTOCOL_VERSION 1
+// Protocol version (bump when breaking wire compatibility)
+#define PZ_NET_PROTOCOL_VERSION 2
 
 // Maximum entities per snapshot
 #define PZ_NET_MAX_TANKS 8
@@ -24,20 +22,25 @@
 #define PZ_NET_MAX_POWERUPS 16
 #define PZ_NET_MAX_MINES 32
 #define PZ_NET_MAX_BARRIERS 32
+#define PZ_NET_MAX_BARRIER_NAME 31
 
 // Message types
 typedef enum pz_net_msg_type {
     PZ_NET_MSG_INPUT = 1, // Client -> Host: player input
     PZ_NET_MSG_SNAPSHOT = 2, // Host -> Client: full state snapshot
-    PZ_NET_MSG_EVENT = 3, // Bidirectional: one-shot events (sounds, etc)
+    PZ_NET_MSG_EVENT = 3, // Host -> Client: reliable one-shot event
 } pz_net_msg_type;
 
 // Event types (for PZ_NET_MSG_EVENT)
 typedef enum pz_net_event_type {
     PZ_NET_EVENT_TANK_DEATH = 1,
     PZ_NET_EVENT_TANK_RESPAWN = 2,
-    PZ_NET_EVENT_EXPLOSION = 3,
-    PZ_NET_EVENT_POWERUP_COLLECT = 4,
+    PZ_NET_EVENT_PROJECTILE_HIT = 3,
+    PZ_NET_EVENT_MINE_EXPLOSION = 4,
+    PZ_NET_EVENT_POWERUP_COLLECT = 5,
+    PZ_NET_EVENT_GUNFIRE = 6,
+    PZ_NET_EVENT_JUMP = 7,
+    PZ_NET_EVENT_BARRIER_PLACED = 8,
 } pz_net_event_type;
 
 // ============================================================================
@@ -46,125 +49,132 @@ typedef enum pz_net_event_type {
 
 #pragma pack(push, 1)
 
-// Message header (all messages start with this)
 typedef struct pz_net_msg_header {
     uint8_t type; // pz_net_msg_type
     uint8_t version; // Protocol version
-    uint16_t length; // Total message length including header
-    uint32_t tick; // Game tick this message relates to
+    uint16_t length; // Exact message length including header
+    uint32_t tick; // Input sequence or host simulation tick
 } pz_net_msg_header;
 
-// Input message (client -> host)
 typedef struct pz_net_msg_input {
     pz_net_msg_header header;
-    float move_x; // Movement direction X
-    float move_y; // Movement direction Y
-    float turret_angle; // Target turret angle
-    uint8_t fire; // Fire button pressed
-    uint8_t place_mine; // Place mine button pressed
-    uint8_t place_barrier; // Place barrier button pressed
-    uint8_t weapon_switch; // 0 = no switch, 1+ = switch to weapon index
+    uint32_t last_host_tick;
+    uint32_t action_sequence;
+    float move_x;
+    float move_y;
+    float turret_angle;
+    float cursor_x;
+    float cursor_y;
+    uint8_t fire_held;
+    uint8_t fire_pressed;
+    uint8_t place_mine;
+    uint8_t place_barrier;
+    int8_t weapon_switch;
+    uint8_t _pad[3];
 } pz_net_msg_input;
 
-// Tank state in snapshot
 typedef struct pz_net_tank_state {
     uint8_t active;
-    uint8_t flags; // Dead, invulnerable, etc.
+    uint8_t flags;
     int8_t id;
     int8_t health;
+    int8_t floor_level;
+    uint8_t jump_state;
+    uint8_t current_weapon;
+    uint8_t mine_count;
+    uint8_t loadout_count;
+    uint8_t loadout[8];
     float pos_x;
     float pos_y;
     float vel_x;
     float vel_y;
     float body_angle;
     float turret_angle;
-    uint8_t current_weapon; // pz_powerup_type
-    uint8_t mine_count;
-    uint8_t loadout_count;
-    uint8_t loadout[8]; // Weapon types in loadout
+    float jump_timer;
+    float jump_duration;
+    float jump_start_x;
+    float jump_start_y;
+    float jump_end_x;
+    float jump_end_y;
+    float jump_start_angle;
+    float jump_end_angle;
+    float jump_height;
+    float jump_apex_height;
 } pz_net_tank_state;
 
-// Projectile state in snapshot
 typedef struct pz_net_projectile_state {
     uint8_t active;
     int8_t owner_id;
     int8_t bounces_remaining;
     int8_t damage;
+    int8_t floor_level;
+    uint8_t color_r;
+    uint8_t color_g;
+    uint8_t color_b;
     float pos_x;
     float pos_y;
     float vel_x;
     float vel_y;
     float lifetime;
     float scale;
-    uint8_t color_r;
-    uint8_t color_g;
-    uint8_t color_b;
-    uint8_t _pad;
 } pz_net_projectile_state;
 
-// Powerup state in snapshot
 typedef struct pz_net_powerup_state {
     uint8_t active;
     uint8_t collected;
-    uint8_t type; // pz_powerup_type
+    uint8_t type;
     uint8_t _pad;
     float pos_x;
     float pos_y;
     float respawn_timer;
 } pz_net_powerup_state;
 
-// Mine state in snapshot
 typedef struct pz_net_mine_state {
     uint8_t active;
     int8_t owner_id;
-    uint8_t armed; // arm_timer <= 0
+    uint8_t armed;
     uint8_t _pad;
     float pos_x;
     float pos_y;
 } pz_net_mine_state;
 
-// Barrier state in snapshot
 typedef struct pz_net_barrier_state {
     uint8_t active;
     uint8_t destroyed;
     int8_t owner_tank_id;
+    int8_t floor_level;
     uint8_t tile_name_len;
+    uint8_t _pad[3];
     float pos_x;
     float pos_y;
     float health;
     float lifetime;
-    // tile_name follows (tile_name_len bytes, no null terminator in wire
-    // format)
+    // tile_name follows (tile_name_len bytes, no null terminator)
 } pz_net_barrier_state;
 
-// Full state snapshot (host -> client)
-// Variable length - contains counts then arrays
 typedef struct pz_net_msg_snapshot {
     pz_net_msg_header header;
+    uint32_t last_processed_input;
+    uint32_t last_processed_action;
     uint8_t tank_count;
     uint8_t projectile_count;
     uint8_t powerup_count;
     uint8_t mine_count;
     uint8_t barrier_count;
-    uint8_t local_tank_id; // Which tank ID the client controls
+    uint8_t local_tank_id; // Tank controlled by the receiving client
     uint8_t _pad[2];
-    // Followed by:
-    // - pz_net_tank_state[tank_count]
-    // - pz_net_projectile_state[projectile_count]
-    // - pz_net_powerup_state[powerup_count]
-    // - pz_net_mine_state[mine_count]
-    // - pz_net_barrier_state[barrier_count] (variable size due to tile_name)
+    // Followed by fixed-size arrays, then variable-size barriers.
 } pz_net_msg_snapshot;
 
-// Event message
 typedef struct pz_net_msg_event {
     pz_net_msg_header header;
-    uint8_t event_type; // pz_net_event_type
-    uint8_t _pad[3];
+    uint8_t event_type;
+    int8_t floor_level;
+    uint8_t extra[2];
     float pos_x;
     float pos_y;
-    int8_t entity_id; // Tank ID, etc.
-    uint8_t extra[3]; // Event-specific data
+    int8_t entity_id;
+    uint8_t _pad[3];
 } pz_net_msg_event;
 
 #pragma pack(pop)
@@ -175,6 +185,8 @@ typedef struct pz_net_msg_event {
 
 typedef struct pz_net_game_state {
     uint32_t tick;
+    uint32_t last_processed_input;
+    uint32_t last_processed_action;
     int8_t local_tank_id;
 
     int tank_count;
@@ -191,44 +203,47 @@ typedef struct pz_net_game_state {
 
     int barrier_count;
     pz_net_barrier_state barriers[PZ_NET_MAX_BARRIERS];
-    char barrier_tile_names[PZ_NET_MAX_BARRIERS][32];
+    char barrier_tile_names[PZ_NET_MAX_BARRIERS][PZ_NET_MAX_BARRIER_NAME + 1];
 } pz_net_game_state;
 
 typedef struct pz_net_input {
-    uint32_t tick;
+    uint32_t sequence;
+    uint32_t last_host_tick;
+    uint32_t action_sequence;
     float move_x;
     float move_y;
     float turret_angle;
-    bool fire;
+    float cursor_x;
+    float cursor_y;
+    bool fire_held;
+    bool fire_pressed;
     bool place_mine;
     bool place_barrier;
     int weapon_switch;
 } pz_net_input;
 
-// ============================================================================
-// API
-// ============================================================================
+typedef struct pz_net_event {
+    uint32_t tick;
+    pz_net_event_type type;
+    float pos_x;
+    float pos_y;
+    int entity_id;
+    int8_t floor_level;
+    uint8_t extra[2];
+} pz_net_event;
 
-// Serialize input to wire format
-// Returns allocated buffer (caller must free), sets *out_len
 uint8_t *pz_net_serialize_input(const pz_net_input *input, size_t *out_len);
-
-// Serialize game state to snapshot message
-// Returns allocated buffer (caller must free), sets *out_len
 uint8_t *pz_net_serialize_snapshot(
     const pz_net_game_state *state, size_t *out_len);
+uint8_t *pz_net_serialize_event(const pz_net_event *event, size_t *out_len);
 
-// Parse message header (returns message type, or 0 on error)
-// Validates version and length
 pz_net_msg_type pz_net_parse_header(
     const uint8_t *data, size_t len, pz_net_msg_header *out_header);
-
-// Parse input message (returns true on success)
 bool pz_net_parse_input(
     const uint8_t *data, size_t len, pz_net_input *out_input);
-
-// Parse snapshot message (returns true on success)
 bool pz_net_parse_snapshot(
     const uint8_t *data, size_t len, pz_net_game_state *out_state);
+bool pz_net_parse_event(
+    const uint8_t *data, size_t len, pz_net_event *out_event);
 
 #endif // PZ_NET_PROTOCOL_H

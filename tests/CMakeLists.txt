@@ -123,3 +123,16 @@ target_include_directories(test_net_offer PRIVATE
 )
 target_compile_definitions(test_net_offer PRIVATE PZ_DEBUG)
 add_test(NAME net_offer COMMAND test_net_offer)
+
+# Network protocol serialization and validation tests
+add_executable(test_net_protocol test_net_protocol.c
+    ../src/net/pz_net_protocol.c
+    ../src/core/pz_mem.c
+)
+target_include_directories(test_net_protocol PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(test_net_protocol PRIVATE PZ_DEBUG)
+target_link_libraries(test_net_protocol PRIVATE m)
+add_test(NAME net_protocol COMMAND test_net_protocol)

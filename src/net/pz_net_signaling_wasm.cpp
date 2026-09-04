@@ -8,12 +8,21 @@
 #include "../core/pz_platform.h"
 #include "../core/pz_str.h"
 
+#include <emscripten.h>
 #include <emscripten/fetch.h>
 
 #include <cstdio>
 #include <cstring>
 
 #define PZ_SIGNALING_PREFIX "o57djoyt37JjRboX6vEJgg"
+
+EM_JS(int, pz_signaling_random_bytes, (uint8_t *buffer, int length), {
+    if (!globalThis.crypto || !globalThis.crypto.getRandomValues)
+        return 0;
+    var bytes = HEAPU8.subarray(buffer, buffer + length);
+    globalThis.crypto.getRandomValues(bytes);
+    return 1;
+});
 
 struct pz_signaling_request {
     pz_signaling_publish_cb publish_cb = nullptr;
@@ -22,8 +31,7 @@ struct pz_signaling_request {
 };
 
 static char *
-pz_signaling_build_url(const char *room, const char *suffix,
-    const char *extra)
+pz_signaling_build_url(const char *room, const char *suffix, const char *extra)
 {
     if (!room || !suffix)
         return nullptr;
@@ -110,23 +118,16 @@ pz_signaling_publish_error(emscripten_fetch_t *fetch)
 const char *
 pz_signaling_generate_room(void)
 {
-    static char room[7];
-    static bool seeded = false;
-    static uint32_t rng_state = 0;
-
-    if (!seeded) {
-        rng_state = (uint32_t)pz_time_now_ms();
-        if (rng_state == 0)
-            rng_state = 0x12345678u;
-        seeded = true;
+    static const char alphabet[] = "23456789abcdefghjkmnpqrstuvwxyz";
+    static char room[9];
+    uint8_t random_bytes[8] = { 0 };
+    if (!pz_signaling_random_bytes(random_bytes, (int)sizeof(random_bytes))) {
+        room[0] = '\0';
+        return room;
     }
-
-    rng_state ^= rng_state << 13;
-    rng_state ^= rng_state >> 17;
-    rng_state ^= rng_state << 5;
-
-    uint32_t value = rng_state & 0xFFFFFFu;
-    snprintf(room, sizeof(room), "%06x", value);
+    for (size_t i = 0; i < sizeof(random_bytes); i++)
+        room[i] = alphabet[random_bytes[i] & 31u];
+    room[8] = '\0';
     return room;
 }
 

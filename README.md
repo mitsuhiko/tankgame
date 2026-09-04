@@ -33,6 +33,27 @@ make release  # Build with release config
 make web      # Build WASM build with docker
 ```
 
+## Multiplayer
+
+The host runs the authoritative simulation. Inputs and snapshots use an
+unordered, no-retransmit WebRTC channel; gameplay events use a separate reliable
+channel. The client predicts its local tank and reconciles against host
+snapshots.
+
+In the web build, choose a map and click **Host match**, then share the generated
+8-character room code or join link. A second player can paste the code into the
+**Room code** field.
+
+Desktop builds use the same signaling flow:
+
+```bash
+./build/tankgame host --map assets/maps/night_arena.map
+./build/tankgame join <room-code>
+```
+
+WebRTC still requires a working route between peers. Public STUN is configured;
+networks that require TURN relaying are not currently supported.
+
 ## Tools
 
 ### Map Tool

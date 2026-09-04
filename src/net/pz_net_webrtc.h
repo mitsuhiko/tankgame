@@ -37,7 +37,13 @@ bool pz_net_webrtc_set_message_callback(pz_net_webrtc *net,
     pz_net_webrtc_message_callback callback, void *user_data);
 bool pz_net_webrtc_set_channel_callback(pz_net_webrtc *net,
     pz_net_webrtc_channel_callback callback, void *user_data);
-bool pz_net_webrtc_send(pz_net_webrtc *net, const uint8_t *data, size_t len);
+// Real-time state/input channel: unordered and no retransmissions.
+bool pz_net_webrtc_send_game(
+    pz_net_webrtc *net, const uint8_t *data, size_t len);
+
+// Ordered/reliable channel for one-shot events and control messages.
+bool pz_net_webrtc_send_reliable(
+    pz_net_webrtc *net, const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

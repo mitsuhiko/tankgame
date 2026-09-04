@@ -6,10 +6,10 @@
 
 #include "../core/pz_log.h"
 #include "../core/pz_mem.h"
-#include "../core/pz_platform.h"
 #include "../core/pz_str.h"
 
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -136,8 +136,9 @@ pz_signaling_run_publish(
     if (!topic)
         return false;
 
-    char *cmd = pz_str_fmt(
-        "curl -s -X POST --data-binary @- https://ntfy.sh/%s", topic);
+    char *cmd = pz_str_fmt("curl --fail --silent --show-error --max-time 10 "
+                           "-X POST --data-binary @- https://ntfy.sh/%s",
+        topic);
     pz_free(topic);
 
     if (!cmd)
@@ -171,7 +172,9 @@ pz_signaling_run_fetch(const char *room, const char *suffix)
     if (!topic)
         return NULL;
 
-    char *cmd = pz_str_fmt("curl -s https://ntfy.sh/%s/raw?poll=1", topic);
+    char *cmd = pz_str_fmt("curl --fail --silent --show-error --max-time 10 "
+                           "https://ntfy.sh/%s/raw?poll=1",
+        topic);
     pz_free(topic);
 
     if (!cmd)
@@ -279,19 +282,21 @@ pz_signaling_worker(void *unused)
     return NULL;
 }
 
-static void
+static bool
 pz_signaling_start_thread(void)
 {
     if (g_signal_thread_running)
-        return;
+        return true;
 
     g_signal_thread_shutdown = false;
     if (pthread_create(&g_signal_thread, NULL, pz_signaling_worker, NULL)
         == 0) {
         g_signal_thread_running = true;
-    } else {
-        PZ_LOG_ERROR(PZ_LOG_CAT_NET, "Failed to start signaling thread");
+        return true;
     }
+
+    PZ_LOG_ERROR(PZ_LOG_CAT_NET, "Failed to start signaling thread");
+    return false;
 }
 
 static void
@@ -300,7 +305,17 @@ pz_signaling_enqueue(pz_signaling_task *task)
     if (!task)
         return;
 
-    pz_signaling_start_thread();
+    if (!pz_signaling_start_thread()) {
+        if (task->type == PZ_SIGNALING_TASK_PUBLISH && task->publish_cb)
+            task->publish_cb(false, task->user_data);
+        if (task->type == PZ_SIGNALING_TASK_FETCH && task->fetch_cb)
+            task->fetch_cb(NULL, task->user_data);
+        pz_free(task->room);
+        pz_free(task->suffix);
+        pz_free(task->message);
+        pz_free(task);
+        return;
+    }
 
     pthread_mutex_lock(&g_signal_mutex);
     if (g_task_tail) {
@@ -317,23 +332,28 @@ pz_signaling_enqueue(pz_signaling_task *task)
 const char *
 pz_signaling_generate_room(void)
 {
-    static char room[7];
-    static bool seeded = false;
-    static uint32_t rng_state = 0;
+    static const char alphabet[] = "23456789abcdefghjkmnpqrstuvwxyz";
+    static char room[9];
+    uint8_t random_bytes[8] = { 0 };
+    bool have_random = false;
 
-    if (!seeded) {
-        rng_state = (uint32_t)pz_time_now_ms();
-        if (rng_state == 0)
-            rng_state = 0x12345678u;
-        seeded = true;
+    FILE *random_file = fopen("/dev/urandom", "rb");
+    if (random_file) {
+        have_random = fread(random_bytes, 1, sizeof(random_bytes), random_file)
+            == sizeof(random_bytes);
+        fclose(random_file);
     }
 
-    rng_state ^= rng_state << 13;
-    rng_state ^= rng_state >> 17;
-    rng_state ^= rng_state << 5;
+    if (!have_random) {
+        PZ_LOG_ERROR(
+            PZ_LOG_CAT_NET, "Secure room-code randomness is unavailable");
+        room[0] = '\0';
+        return room;
+    }
 
-    uint32_t value = rng_state & 0xFFFFFFu;
-    snprintf(room, sizeof(room), "%06x", value);
+    for (size_t i = 0; i < sizeof(random_bytes); i++)
+        room[i] = alphabet[random_bytes[i] & 31u];
+    room[8] = '\0';
     return room;
 }
 

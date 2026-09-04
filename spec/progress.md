@@ -182,8 +182,9 @@
 - [x] N1: network protocol (pz_net_protocol.h/c) with snapshot format
 - [x] N2: host-authoritative model (host runs simulation, sends snapshots)
 - [x] N3: client receives snapshots, applies full state (tanks, projectiles, powerups, mines)
-- [ ] N4: sound/particle events over network
-- [ ] N5: client-side prediction for local tank
+- [x] N4: reliable sound/particle events
+- [x] N5: local prediction with input acknowledgement and replay
+- [x] N6: dual channels, stable IDs, safe queues, robust room signaling
 
 ## Multi-Floor Support
 - [x] MF1: floor_level tracking for tanks, projectiles, barriers

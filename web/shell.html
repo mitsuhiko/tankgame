@@ -130,21 +130,44 @@
         }
         .host-controls {
             display: flex;
+            flex-wrap: wrap;
             gap: 8px;
             align-items: center;
         }
-        select {
+        select, .room-input {
             appearance: none;
             background: rgba(255, 255, 255, 0.06);
             color: var(--text);
             border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 10px;
-            padding: 10px 32px 10px 14px;
+            padding: 10px 14px;
             font-size: 13px;
+        }
+        select {
+            padding-right: 32px;
             cursor: pointer;
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23e8edf3' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 10px center;
+        }
+        .room-input {
+            width: 132px;
+            font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+            letter-spacing: 0.12em;
+            text-transform: lowercase;
+        }
+        .room-input::placeholder {
+            color: #707989;
+            letter-spacing: 0.04em;
+        }
+        .room-input:focus-visible, select:focus-visible, button:focus-visible {
+            outline: 2px solid var(--accent-2);
+            outline-offset: 2px;
+        }
+        .network-divider {
+            width: 1px;
+            height: 28px;
+            background: rgba(255, 255, 255, 0.12);
         }
         select:hover {
             border-color: rgba(93, 211, 158, 0.5);
@@ -207,6 +230,9 @@
         .host-status.connected {
             color: var(--accent-2);
         }
+        .host-status.error {
+            color: #ff7b72;
+        }
         button {
             appearance: none;
             background: rgba(255, 255, 255, 0.06);
@@ -257,6 +283,19 @@
                 flex-direction: column;
                 align-items: flex-start;
             }
+            .controls-right, .host-controls {
+                width: 100%;
+            }
+            .host-controls select {
+                width: 100%;
+            }
+            .host-controls .room-input {
+                flex: 1;
+                min-width: 0;
+            }
+            .network-divider {
+                display: none;
+            }
         }
     </style>
 </head>
@@ -264,7 +303,7 @@
     <div class="frame">
         <div class="header">
             <div class="title">Tank Game</div>
-            <div class="status" id="status">Booting...</div>
+            <div class="status" id="status" role="status" aria-live="polite">Booting...</div>
         </div>
 
         <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
@@ -295,7 +334,11 @@
                         <option value="assets/maps/adrian_arena.map">Adrian Arena</option>
                         <option value="assets/maps/martin_arena.map">Martin Arena</option>
                     </select>
-                    <button type="button" id="host-btn" onclick="startHost()">Host</button>
+                    <button type="button" id="host-btn" onclick="startHost()">Host match</button>
+                    <span class="network-divider" aria-hidden="true"></span>
+                    <label for="room-input" style="position:absolute;left:-10000px">Room code</label>
+                    <input class="room-input" id="room-input" maxlength="8" autocomplete="off" spellcheck="false" placeholder="room code">
+                    <button type="button" id="join-btn" onclick="joinRoom()">Join</button>
                 </div>
                 <button type="button" onclick="toggleFullscreen()">Fullscreen</button>
             </div>
@@ -317,7 +360,7 @@
             <h3>Hosting Game</h3>
             <div class="host-info-row">
                 <span class="host-info-label">Room Code</span>
-                <span class="host-info-value room-code" id="host-room-code">------</span>
+                <span class="host-info-value room-code" id="host-room-code">--------</span>
                 <button type="button" class="copy-btn" onclick="copyRoomCode(this)">Copy</button>
             </div>
             <div class="host-info-row">
@@ -325,15 +368,13 @@
                 <span class="host-info-value" id="host-join-link">...</span>
                 <button type="button" class="copy-btn" onclick="copyJoinLink(this)">Copy</button>
             </div>
-            <div class="host-status" id="host-status">Waiting for player to join...</div>
+            <div class="host-status" id="host-status" role="status" aria-live="polite">Waiting for player to join...</div>
         </div>
     </div>
 
     <script>
-        var SIGNALING_PREFIX = 'o57djoyt37JjRboX6vEJgg';
-
         function isRoomCode(value) {
-            return /^[a-fA-F0-9]{6}$/.test(value);
+            return /^[2-9a-hjkmnp-zA-HJKMNP-Z]{8}$/.test(value);
         }
 
         function getJoinInfo() {
@@ -454,6 +495,10 @@
                     controls.style.display = 'flex';
                 }
                 Module.setStatus(joinInfo ? 'Joining match...' : 'Ready');
+                if (joinInfo) {
+                    connectionCheckInterval
+                        = setInterval(updateConnectionStatus, 500);
+                }
             },
             totalDependencies: 0,
             monitorRunDependencies: function (left) {
@@ -477,8 +522,51 @@
         }
 
         var hostCheckInterval = null;
+        var connectionCheckInterval = null;
 
-        function startHost() {
+        function updateConnectionStatus() {
+            var failed = Module.ccall('pz_web_net_failed', 'number', [], []);
+            if (failed) {
+                Module.setStatus('Connection failed — reload to retry');
+                var failedPanel = document.getElementById('join-panel');
+                var failedHeading = failedPanel ? failedPanel.querySelector('h3') : null;
+                var failedDesc = failedPanel ? failedPanel.querySelector('p') : null;
+                if (failedHeading) failedHeading.textContent = 'Connection failed';
+                if (failedDesc) failedDesc.textContent = 'Check the room code and reload to try again.';
+                clearInterval(connectionCheckInterval);
+                connectionCheckInterval = null;
+                return;
+            }
+
+            var connected = Module.ccall(
+                'pz_web_is_peer_connected', 'number', [], []);
+            if (!connected) return;
+
+            Module.setStatus('Connected');
+            var panel = document.getElementById('join-panel');
+            var heading = panel ? panel.querySelector('h3') : null;
+            var desc = panel ? panel.querySelector('p') : null;
+            if (heading) heading.textContent = 'Connected';
+            if (desc) desc.textContent = 'Peer-to-peer channel established. Good hunting.';
+            if (connectionCheckInterval) {
+                clearInterval(connectionCheckInterval);
+                connectionCheckInterval = null;
+            }
+        }
+
+        function joinRoom() {
+            var input = document.getElementById('room-input');
+            var room = input ? input.value.trim().toLowerCase() : '';
+            if (!isRoomCode(room)) {
+                alert('Enter the 8-character room code from the host.');
+                if (input) input.focus();
+                return;
+            }
+            window.location.hash = '#join/' + room;
+            window.location.reload();
+        }
+
+        async function startHost() {
             var mapSelect = document.getElementById('map-select');
             var mapPath = mapSelect ? mapSelect.value : '';
             if (!mapPath) {
@@ -492,8 +580,15 @@
                 hostBtn.textContent = 'Starting...';
             }
 
-            // Call into WASM to start hosting
-            var result = Module.ccall('pz_web_start_host', 'number', ['string'], [mapPath]);
+            // Offer creation waits for ICE gathering and therefore must use
+            // Asyncify-aware ccall instead of blocking the browser main loop.
+            var result = 0;
+            try {
+                result = await Module.ccall('pz_web_start_host', 'number',
+                    ['string'], [mapPath], { async: true });
+            } catch (error) {
+                console.error('Failed to start host:', error);
+            }
             if (result) {
                 // Success - show host info panel
                 var hostControls = document.getElementById('host-controls');
@@ -511,7 +606,7 @@
                 alert('Failed to start hosting. Check console for details.');
                 if (hostBtn) {
                     hostBtn.disabled = false;
-                    hostBtn.textContent = 'Host';
+                    hostBtn.textContent = 'Host match';
                 }
             }
         }
@@ -519,6 +614,7 @@
         function updateHostInfo() {
             var roomCode = Module.ccall('pz_web_get_room_code', 'string', [], []);
             var isConnected = Module.ccall('pz_web_is_peer_connected', 'number', [], []);
+            var failed = Module.ccall('pz_web_net_failed', 'number', [], []);
 
             var roomCodeEl = document.getElementById('host-room-code');
             var joinLinkEl = document.getElementById('host-join-link');
@@ -535,7 +631,14 @@
             }
 
             if (statusEl) {
-                if (isConnected) {
+                if (failed) {
+                    statusEl.textContent = 'Signaling failed — reload to retry.';
+                    statusEl.className = 'host-status error';
+                    if (hostCheckInterval) {
+                        clearInterval(hostCheckInterval);
+                        hostCheckInterval = null;
+                    }
+                } else if (isConnected) {
                     statusEl.textContent = 'Player connected!';
                     statusEl.className = 'host-status connected';
                     // Stop checking once connected
@@ -577,6 +680,13 @@
             }, 1500);
         }
 
+        var roomInput = document.getElementById('room-input');
+        if (roomInput) {
+            roomInput.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter') joinRoom();
+            });
+        }
+
         if (joinInfo) {
             var joinPanel = document.getElementById('join-panel');
             var payloadArea = document.getElementById('join-payload');
@@ -599,7 +709,7 @@
                     heading.textContent = 'Joining Room: ' + joinRoomCode;
                 }
                 if (desc) {
-                    desc.textContent = 'Connecting via ntfy.sh signaling...';
+                    desc.textContent = 'Exchanging an encrypted peer-to-peer connection...';
                 }
                 if (showButton) {
                     showButton.style.display = 'none';
